@@ -1,11 +1,10 @@
 """
-export.py — V2.0 Excel report generation with OpenpyXL.
+export.py — V2.1 Excel report generation with OpenpyXL.
 
-V2.0 changes
+V2.1 changes
 -------------
-* Added Total Price, Total Weight, Per-Share Price, Per-Share Weight columns.
-* All financial values displayed with 2/3 decimal precision.
-* Designed to run on a **QThread** — no GUI calls here.
+* Added "Pay (Fraction)" column per shareholder.
+* Per-share price/weight now uses fraction-weighted calculation.
 """
 
 from __future__ import annotations
@@ -33,17 +32,14 @@ _FONT_HEADER = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
 _FONT_BODY = Font(name="Calibri", size=11)
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 _BORDER = Border(
-    left=Side(style="thin"),
-    right=Side(style="thin"),
-    top=Side(style="thin"),
-    bottom=Side(style="thin"),
+    left=Side(style="thin"), right=Side(style="thin"),
+    top=Side(style="thin"), bottom=Side(style="thin"),
 )
 
 MAX_SHAREHOLDERS = 7
 
 
 def _style(cell, *, font=_FONT_BODY, fill=None):
-    """Apply common styling to a cell."""
     cell.font = font
     cell.alignment = _CENTER
     cell.border = _BORDER
@@ -56,27 +52,22 @@ def _style(cell, *, font=_FONT_BODY, fill=None):
 # ---------------------------------------------------------------------------
 
 def generate_excel_report(records: List[AnimalRecord], dest: Path) -> None:
-    """Create a styled Excel workbook at *dest*.
-
-    Raises ``OSError`` / ``PermissionError`` on file-system problems.
-    """
     wb = Workbook()
     ws = wb.active
     assert ws is not None
     ws.title = "Kurban Raporu"
 
-    # ── Header row ──────────────────────────────────────────────────────
+    # ── Header ──────────────────────────────────────────────────────────
     headers: List[str] = [
-        "Hayvan ID",
-        "Kesim Tarihi",
-        "Toplam Fiyat (₺)",
-        "Toplam Ağırlık (kg)",
-        "Hisse Fiyat (₺)",
-        "Hisse Ağırlık (kg)",
+        "Hayvan ID", "Kesim Tarihi",
+        "Toplam Fiyat (₺)", "Toplam Ağırlık (kg)",
+        "Toplam Pay",
     ]
     for i in range(1, MAX_SHAREHOLDERS + 1):
         headers.append(f"Hissedar {i} Telefon")
         headers.append(f"Hissedar {i} Ad Soyad")
+        headers.append(f"Hissedar {i} Pay")
+        headers.append(f"Hissedar {i} Hisse Fiyat")
         headers.append(f"Hissedar {i} Durum")
 
     for col_idx, text in enumerate(headers, start=1):
@@ -97,14 +88,12 @@ def generate_excel_report(records: List[AnimalRecord], dest: Path) -> None:
         c = ws.cell(row=row_idx, column=4, value=str(animal.total_weight))
         _style(c)
 
-        c = ws.cell(row=row_idx, column=5, value=str(animal.price_per_share))
+        c = ws.cell(row=row_idx, column=5, value=animal.total_fractions)
         _style(c)
 
-        c = ws.cell(row=row_idx, column=6, value=str(animal.weight_per_share))
-        _style(c)
-
+        tf = animal.total_fractions
         for sh_idx, share in enumerate(animal.shares):
-            base_col = 7 + sh_idx * 3
+            base_col = 6 + sh_idx * 5
             fill = _FILL_GREEN if share.is_paid else _FILL_RED
 
             c = ws.cell(row=row_idx, column=base_col, value=share.phone)
@@ -113,8 +102,15 @@ def generate_excel_report(records: List[AnimalRecord], dest: Path) -> None:
             c = ws.cell(row=row_idx, column=base_col + 1, value=share.shareholder_name)
             _style(c, fill=fill)
 
+            c = ws.cell(row=row_idx, column=base_col + 2, value=share.share_fraction)
+            _style(c, fill=fill)
+
+            sh_price = share.price_for(animal.total_price, tf)
+            c = ws.cell(row=row_idx, column=base_col + 3, value=str(sh_price))
+            _style(c, fill=fill)
+
             status = "Ödendi" if share.is_paid else "Ödenmedi"
-            c = ws.cell(row=row_idx, column=base_col + 2, value=status)
+            c = ws.cell(row=row_idx, column=base_col + 4, value=status)
             _style(c, fill=fill)
 
     # ── Auto-fit column widths ──────────────────────────────────────────

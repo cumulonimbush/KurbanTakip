@@ -1,10 +1,10 @@
 """
-main.py — V2.0 Application entry point.
+main.py — V2.1 Application entry point.
 
-Configures logging (file + console), initialises the database,
-wires Repository → Controller → GUI, and starts the Qt event loop.
-
-Path resolution uses ``database.APP_DIR`` which is Nuitka-safe.
+V2.1 changes
+-------------
+* Loads ``style.qss`` from disk (Nuitka-safe ``APP_DIR``) and applies it
+  globally via ``app.setStyleSheet()``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from database import APP_DIR, initialise_database
 
 # ---------------------------------------------------------------------------
-# Logging configuration  (must happen before any other import that logs)
+# Logging configuration
 # ---------------------------------------------------------------------------
 
 LOG_FILE = APP_DIR / "app.log"
@@ -34,12 +34,10 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    logger.info("===== Kurban Takip Sistemi V2.0 starting =====")
+    logger.info("===== Kurban Takip Sistemi V2.1 starting =====")
 
-    # DB bootstrap
     initialise_database()
 
-    # Late imports so logging is already configured
     from PyQt6.QtGui import QFont
     from PyQt6.QtWidgets import QApplication
 
@@ -50,6 +48,15 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
     app.setStyle("Fusion")
+
+    # ── Load external QSS stylesheet ───────────────────────────────────
+    qss_path = APP_DIR / "style.qss"
+    if qss_path.exists():
+        qss_text = qss_path.read_text(encoding="utf-8")
+        app.setStyleSheet(qss_text)
+        logger.info("Loaded stylesheet from %s", qss_path)
+    else:
+        logger.warning("style.qss not found at %s — using defaults", qss_path)
 
     repo = KurbanRepository()
     controller = KurbanController(repo)

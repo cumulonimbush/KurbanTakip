@@ -1,13 +1,12 @@
 """
-models.py — V2.0 Domain models for the Kurban Tracking Application.
+models.py — V2.1 Domain models for the Kurban Tracking Application.
 
-Changes from V1
-----------------
-* ``tc_no`` replaced by ``phone`` (E.164 formatted string).
-* ``total_price`` / ``total_weight`` added as ``Decimal`` fields on animals.
-* Per-share price/weight computed dynamically — never stored.
-* All money is in **kuruş** (1/100 TRY) and weight in **grams** internally;
-  the ``Decimal`` ↔ INTEGER conversion lives in the repository layer.
+V2.1 changes
+-------------
+* ``share_fraction`` (int, 1–7) added to ``AnimalShare`` and staging models.
+* ``price_per_share`` / ``weight_per_share`` now compute fraction-weighted
+  values: ``(total / sum_of_fractions) * this_fraction``.
+* New convenience ``total_fractions`` property on ``AnimalRecord``.
 """
 
 from __future__ import annotations
@@ -17,88 +16,103 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Tuple
 
-# Number of decimal places for display (TRY → kuruş = 2, kg → gram = 3)
 _PRICE_PLACES = Decimal("0.01")
 _WEIGHT_PLACES = Decimal("0.001")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Persisted domain models (frozen — treat as read-only after hydration)
+# Persisted domain models (frozen)
 # ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class Shareholder:
     """A person identified by their phone number (E.164)."""
-
-    phone: str          # e.g. "+905551234567"
+    phone: str
     name: str
 
 
 @dataclass(frozen=True)
 class AnimalShare:
     """Junction record linking one shareholder to one animal."""
-
     animal_id: int
     phone: str
     shareholder_name: str
     is_paid: bool
+    share_fraction: int = 1       # NEW in V2.1
+
+    # -- fraction-aware computed helpers ──────────────────────────────
+
+    def price_for(self, total_price: Decimal, total_fractions: int) -> Decimal:
+        """This shareholder's cost based on their fraction."""
+        if total_fractions == 0:
+            return Decimal("0.00")
+        return (total_price / total_fractions * self.share_fraction).quantize(
+            _PRICE_PLACES, rounding=ROUND_HALF_UP
+        )
+
+    def weight_for(self, total_weight: Decimal, total_fractions: int) -> Decimal:
+        """This shareholder's weight based on their fraction."""
+        if total_fractions == 0:
+            return Decimal("0.000")
+        return (total_weight / total_fractions * self.share_fraction).quantize(
+            _WEIGHT_PLACES, rounding=ROUND_HALF_UP
+        )
 
 
 @dataclass(frozen=True)
 class AnimalRecord:
     """A fully-hydrated animal with metadata and all associated shares."""
-
     animal_id: int
     slaughter_date: date
-    total_price: Decimal          # TRY (e.g. Decimal("15000.00"))
-    total_weight: Decimal         # kg  (e.g. Decimal("250.500"))
+    total_price: Decimal
+    total_weight: Decimal
     shares: Tuple[AnimalShare, ...] = field(default_factory=tuple)
-
-    # -- computed properties ──────────────────────────────────────────
 
     @property
     def share_count(self) -> int:
         return len(self.shares)
 
     @property
-    def price_per_share(self) -> Decimal:
-        """Price per shareholder in TRY, rounded to 2 decimal places."""
-        if self.share_count == 0:
-            return Decimal("0.00")
-        return (self.total_price / self.share_count).quantize(
-            _PRICE_PLACES, rounding=ROUND_HALF_UP
-        )
+    def total_fractions(self) -> int:
+        """Sum of all share fractions (denominator for per-share calc)."""
+        return sum(s.share_fraction for s in self.shares)
 
     @property
-    def weight_per_share(self) -> Decimal:
-        """Weight per shareholder in kg, rounded to 3 decimal places."""
-        if self.share_count == 0:
+    def price_per_unit_fraction(self) -> Decimal:
+        """Price for 1 unit of fraction."""
+        tf = self.total_fractions
+        if tf == 0:
+            return Decimal("0.00")
+        return (self.total_price / tf).quantize(_PRICE_PLACES, rounding=ROUND_HALF_UP)
+
+    @property
+    def weight_per_unit_fraction(self) -> Decimal:
+        """Weight for 1 unit of fraction."""
+        tf = self.total_fractions
+        if tf == 0:
             return Decimal("0.000")
-        return (self.total_weight / self.share_count).quantize(
-            _WEIGHT_PLACES, rounding=ROUND_HALF_UP
-        )
+        return (self.total_weight / tf).quantize(_WEIGHT_PLACES, rounding=ROUND_HALF_UP)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Staging-only models (mutable — GUI populates these before commit)
+# Staging models (mutable)
 # ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class StagedShareholderEntry:
     """One shareholder row inside the staging form."""
-
-    phone: str          # raw user input; normalised to E.164 by controller
+    phone: str
     name: str
     is_paid: bool
+    share_fraction: int = 1       # NEW in V2.1
 
 
 @dataclass
 class StagedAnimal:
     """An animal waiting in the staging area before DB commit."""
-
     slaughter_date: date
-    total_price: Decimal          # TRY
-    total_weight: Decimal         # kg
+    total_price: Decimal
+    total_weight: Decimal
     shareholders: List[StagedShareholderEntry] = field(default_factory=list)
 
 
@@ -109,9 +123,8 @@ class StagedAnimal:
 @dataclass(frozen=True)
 class PaginatedResult:
     """Wraps a page of ``AnimalRecord`` objects with pagination metadata."""
-
     records: Tuple[AnimalRecord, ...]
-    page: int               # 1-based current page
+    page: int
     per_page: int
     total_records: int
 

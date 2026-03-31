@@ -1,18 +1,14 @@
 """
-gui.py — V2.0 PyQt6 interface for the Kurban Tracking Application.
+gui.py — V2.1 PyQt6 interface for the Kurban Tracking Application.
 
-V2.0 changes
+V2.1 changes
 -------------
-* **Phone input**: Country-code dropdown + NSN text field (replaces TC No).
-* **Dynamic shareholders**: "Add / Remove" buttons instead of static dropdown
-  (programmatic cap at 7).
-* **Price / Weight fields**: Decimal input with proper locale display.
-* **Paginated search** (50/page) with Prev / Next buttons.
-* **Edit modal dialog**: double-click opens a dedicated ``QDialog`` for
-  the animal and its shareholders — no inline table editing.
-* **Async export**: ``ExportWorker(QThread)`` unchanged from V1.
-* **Checkbox rollback**: ``blockSignals`` + revert on DB failure.
-* **Auto-backup** on close and after export.
+* **Stylesheet extracted** to ``style.qss`` — no ``_STYLESHEET`` string here.
+* **Dynamic country codes** from ``phonenumbers.SUPPORTED_REGIONS``
+  (TR pinned at top, rest alphabetical).
+* **Fractional shares** via ``QSpinBox`` (1–7) in Registration and Edit Dialog.
+* **Full CRUD in Edit Dialog**: "Delete Animal", "Add Shareholder",
+  "Remove Selected Shareholder" buttons.
 """
 
 from __future__ import annotations
@@ -21,7 +17,9 @@ import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+import phonenumbers
 
 from PyQt6.QtCore import QDate, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
@@ -46,6 +44,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpacerItem,
+    QSpinBox,
     QStatusBar,
     QTabWidget,
     QTableWidget,
@@ -61,172 +60,37 @@ from models import AnimalRecord, StagedShareholderEntry
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Country-code data  (top entries for likely use-case, then alphabetical)
-# ---------------------------------------------------------------------------
 
-_COUNTRY_CODES = [
-    ("TR", "+90", "🇹🇷  Türkiye (+90)"),
-    ("DE", "+49", "🇩🇪  Almanya (+49)"),
-    ("NL", "+31", "🇳🇱  Hollanda (+31)"),
-    ("FR", "+33", "🇫🇷  Fransa (+33)"),
-    ("GB", "+44", "🇬🇧  İngiltere (+44)"),
-    ("US", "+1",  "🇺🇸  ABD (+1)"),
-    ("AT", "+43", "🇦🇹  Avusturya (+43)"),
-    ("BE", "+32", "🇧🇪  Belçika (+32)"),
-    ("SA", "+966","🇸🇦  S. Arabistan (+966)"),
-    ("AZ", "+994","🇦🇿  Azerbaycan (+994)"),
-]
+# ═══════════════════════════════════════════════════════════════════════════
+# Dynamic country-code list from phonenumbers
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ---------------------------------------------------------------------------
-# Stylesheet  (dark, modern)
-# ---------------------------------------------------------------------------
+def _build_country_codes() -> List[Tuple[str, str, str]]:
+    """Return ``[(iso, dial_code, display_label), ...]``.
 
-_STYLESHEET = """
-QMainWindow {
-    background-color: #0F172A;
-}
-QTabWidget::pane {
-    border: 1px solid #334155;
-    border-radius: 8px;
-    background: #1E293B;
-    margin-top: -1px;
-}
-QTabBar::tab {
-    background: #1E293B;
-    color: #94A3B8;
-    padding: 10px 24px;
-    margin-right: 2px;
-    border-top-left-radius: 8px;
-    border-top-right-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-}
-QTabBar::tab:selected {
-    background: #334155;
-    color: #F8FAFC;
-    border-bottom: 2px solid #3B82F6;
-}
-QTabBar::tab:hover:!selected {
-    background: #273548;
-    color: #CBD5E1;
-}
-QGroupBox {
-    background: #1E293B;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    margin-top: 14px;
-    padding-top: 24px;
-    font-size: 13px;
-    font-weight: 600;
-    color: #E2E8F0;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 14px;
-    padding: 0 6px;
-}
-QLabel {
-    color: #CBD5E1;
-    font-size: 12px;
-}
-QLineEdit, QDateEdit, QComboBox {
-    background-color: #0F172A;
-    color: #F1F5F9;
-    border: 1px solid #475569;
-    border-radius: 6px;
-    padding: 7px 10px;
-    font-size: 12px;
-    selection-background-color: #3B82F6;
-}
-QLineEdit:focus, QDateEdit:focus, QComboBox:focus {
-    border-color: #3B82F6;
-}
-QComboBox::drop-down { border: none; width: 28px; }
-QComboBox QAbstractItemView {
-    background: #1E293B;
-    color: #F1F5F9;
-    selection-background-color: #3B82F6;
-    border: 1px solid #475569;
-}
-QPushButton {
-    background-color: #3B82F6;
-    color: #FFFFFF;
-    border: none;
-    border-radius: 6px;
-    padding: 9px 20px;
-    font-size: 12px;
-    font-weight: 600;
-}
-QPushButton:hover { background-color: #2563EB; }
-QPushButton:pressed { background-color: #1D4ED8; }
-QPushButton:disabled { background-color: #334155; color: #64748B; }
-QPushButton#btnDanger { background-color: #EF4444; }
-QPushButton#btnDanger:hover { background-color: #DC2626; }
-QPushButton#btnSuccess { background-color: #22C55E; }
-QPushButton#btnSuccess:hover { background-color: #16A34A; }
-QPushButton#btnExport { background-color: #8B5CF6; }
-QPushButton#btnExport:hover { background-color: #7C3AED; }
-QPushButton#btnSmall {
-    padding: 5px 12px; font-size: 11px;
-    background-color: #475569;
-}
-QPushButton#btnSmall:hover { background-color: #64748B; }
-QPushButton#btnRemove {
-    padding: 5px 12px; font-size: 11px;
-    background-color: #EF4444;
-}
-QPushButton#btnRemove:hover { background-color: #DC2626; }
-QTableWidget {
-    background-color: #0F172A;
-    color: #E2E8F0;
-    border: 1px solid #334155;
-    border-radius: 6px;
-    gridline-color: #334155;
-    font-size: 12px;
-    selection-background-color: #1E3A5F;
-}
-QTableWidget::item { padding: 5px; }
-QHeaderView::section {
-    background-color: #1E293B;
-    color: #94A3B8;
-    border: 1px solid #334155;
-    padding: 6px;
-    font-weight: 600;
-    font-size: 11px;
-}
-QScrollBar:vertical {
-    background: #0F172A; width: 10px; border-radius: 5px;
-}
-QScrollBar::handle:vertical {
-    background: #475569; border-radius: 5px; min-height: 30px;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QProgressBar {
-    background: #1E293B; border: 1px solid #334155;
-    border-radius: 6px; text-align: center;
-    color: #F1F5F9; font-size: 11px;
-}
-QProgressBar::chunk {
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-        stop:0 #3B82F6,stop:1 #8B5CF6);
-    border-radius: 5px;
-}
-QCheckBox { color: #CBD5E1; spacing: 6px; font-size: 12px; }
-QCheckBox::indicator {
-    width: 18px; height: 18px; border-radius: 4px;
-    border: 2px solid #475569; background: #0F172A;
-}
-QCheckBox::indicator:checked { background: #3B82F6; border-color: #3B82F6; }
-QRadioButton { color: #CBD5E1; font-size: 12px; spacing: 6px; }
-QRadioButton::indicator {
-    width: 16px; height: 16px; border-radius: 8px;
-    border: 2px solid #475569; background: #0F172A;
-}
-QRadioButton::indicator:checked { background: #3B82F6; border-color: #3B82F6; }
-QStatusBar { background: #0F172A; color: #64748B; font-size: 11px; }
-QDialog { background-color: #1E293B; }
-"""
+    TR is pinned at the top; everything else is alphabetical by ISO code.
+    """
+    entries: List[Tuple[str, str, str]] = []
+    for region in sorted(phonenumbers.SUPPORTED_REGIONS):
+        code = phonenumbers.country_code_for_region(region)
+        label = f"{region} (+{code})"
+        entries.append((region, f"+{code}", label))
+
+    # Pin TR at top
+    tr_entry: Optional[Tuple[str, str, str]] = None
+    rest: List[Tuple[str, str, str]] = []
+    for entry in entries:
+        if entry[0] == "TR":
+            tr_entry = entry
+        else:
+            rest.append(entry)
+
+    if tr_entry:
+        return [tr_entry] + rest
+    return rest
+
+
+COUNTRY_CODES = _build_country_codes()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -257,9 +121,9 @@ class ExportWorker(QThread):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ShareholderRow(QWidget):
-    """One shareholder entry: [index] [country] [phone] [name] [paid] [✕]"""
+    """[idx] [country] [phone] [name] [fraction spinbox] [paid] [✕]"""
 
-    remove_requested = pyqtSignal(object)  # emits self
+    remove_requested = pyqtSignal(object)
 
     def __init__(self, index: int, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -274,20 +138,28 @@ class ShareholderRow(QWidget):
         layout.addWidget(self.lbl_idx)
 
         self.combo_country = QComboBox()
-        self.combo_country.setMinimumWidth(175)
-        for _iso, _code, _label in _COUNTRY_CODES:
+        self.combo_country.setMinimumWidth(140)
+        for _iso, _code, _label in COUNTRY_CODES:
             self.combo_country.addItem(_label, _iso)
         layout.addWidget(self.combo_country)
 
         self.edit_phone = QLineEdit()
         self.edit_phone.setPlaceholderText("5XX XXX XX XX")
-        self.edit_phone.setMinimumWidth(140)
+        self.edit_phone.setMinimumWidth(130)
         layout.addWidget(self.edit_phone)
 
         self.edit_name = QLineEdit()
         self.edit_name.setPlaceholderText("Ad Soyad")
-        self.edit_name.setMinimumWidth(160)
+        self.edit_name.setMinimumWidth(140)
         layout.addWidget(self.edit_name, stretch=1)
+
+        self.spin_fraction = QSpinBox()
+        self.spin_fraction.setRange(1, 7)
+        self.spin_fraction.setValue(1)
+        self.spin_fraction.setPrefix("Pay: ")
+        self.spin_fraction.setFixedWidth(85)
+        self.spin_fraction.setToolTip("Hisse payı (1–7)")
+        layout.addWidget(self.spin_fraction)
 
         self.cb_paid = QCheckBox("Ödendi")
         layout.addWidget(self.cb_paid)
@@ -305,15 +177,15 @@ class ShareholderRow(QWidget):
         return self.combo_country.currentData()
 
     def to_entry(self) -> StagedShareholderEntry:
-        """Build a staging entry with the *raw* phone (controller normalises)."""
         raw = self.edit_phone.text().strip()
-        # Prepend the country code so the controller can parse with region=None
-        code = _COUNTRY_CODES[self.combo_country.currentIndex()][1]
+        idx = self.combo_country.currentIndex()
+        code = COUNTRY_CODES[idx][1]
         full_phone = f"{code}{raw}" if raw and not raw.startswith("+") else raw
         return StagedShareholderEntry(
             phone=full_phone,
             name=self.edit_name.text().strip(),
             is_paid=self.cb_paid.isChecked(),
+            share_fraction=self.spin_fraction.value(),
         )
 
     def set_index(self, idx: int) -> None:
@@ -322,11 +194,12 @@ class ShareholderRow(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Edit modal dialog
+# Edit modal dialog  (V2.1 — Full CRUD)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class AnimalEditDialog(QDialog):
-    """Modal dialog for editing an existing animal and toggling payments."""
+    """Modal for editing an animal: update fields, toggle payments,
+    add/remove shareholders, or delete the whole animal."""
 
     def __init__(
         self, record: AnimalRecord, ctrl: KurbanController, parent: Optional[QWidget] = None
@@ -335,10 +208,10 @@ class AnimalEditDialog(QDialog):
         self._record = record
         self._ctrl = ctrl
         self._changed = False
+        self._deleted = False
 
         self.setWindowTitle(f"Hayvan #{record.animal_id} — Düzenle")
-        self.setMinimumWidth(700)
-        self.setStyleSheet(_STYLESHEET)
+        self.setMinimumWidth(780)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -367,25 +240,31 @@ class AnimalEditDialog(QDialog):
         self._weight_edit = QLineEdit(str(record.total_weight))
         ig.addWidget(self._weight_edit, 3, 1)
 
-        ig.addWidget(QLabel("Hisse Fiyat:"), 4, 0)
-        self._per_price_lbl = QLabel(f"{record.price_per_share} ₺")
-        self._per_price_lbl.setStyleSheet("color: #22C55E; font-weight: bold;")
-        ig.addWidget(self._per_price_lbl, 4, 1)
+        ig.addWidget(QLabel("Toplam Pay:"), 4, 0)
+        self._frac_label = QLabel(str(record.total_fractions))
+        self._frac_label.setStyleSheet("color: #F59E0B; font-weight: bold;")
+        ig.addWidget(self._frac_label, 4, 1)
 
-        ig.addWidget(QLabel("Hisse Ağırlık:"), 5, 0)
-        self._per_weight_lbl = QLabel(f"{record.weight_per_share} kg")
+        ig.addWidget(QLabel("Birim Pay Fiyat:"), 5, 0)
+        self._per_price_lbl = QLabel(f"{record.price_per_unit_fraction} ₺")
+        self._per_price_lbl.setStyleSheet("color: #22C55E; font-weight: bold;")
+        ig.addWidget(self._per_price_lbl, 5, 1)
+
+        ig.addWidget(QLabel("Birim Pay Ağırlık:"), 6, 0)
+        self._per_weight_lbl = QLabel(f"{record.weight_per_unit_fraction} kg")
         self._per_weight_lbl.setStyleSheet("color: #22C55E; font-weight: bold;")
-        ig.addWidget(self._per_weight_lbl, 5, 1)
+        ig.addWidget(self._per_weight_lbl, 6, 1)
 
         layout.addWidget(info_group)
 
         # ── Shareholders table ─────────────────────────────────────────
         sh_group = QGroupBox(f"Hissedarlar ({len(record.shares)})")
+        self._sh_group = sh_group
         sl = QVBoxLayout(sh_group)
 
-        self._sh_table = QTableWidget(len(record.shares), 4)
+        self._sh_table = QTableWidget(len(record.shares), 6)
         self._sh_table.setHorizontalHeaderLabels(
-            ["Telefon", "Ad Soyad", "Ödendi", "Hisse Fiyat"]
+            ["Telefon", "Ad Soyad", "Pay", "Hisse Fiyat", "Ödendi", "Seç"]
         )
         hh = self._sh_table.horizontalHeader()
         assert hh is not None
@@ -393,53 +272,118 @@ class AnimalEditDialog(QDialog):
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self._sh_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
-        for row, share in enumerate(record.shares):
+        self._populate_sh_table()
+        sl.addWidget(self._sh_table)
+
+        # Add / Remove shareholder buttons
+        sh_btn_row = QHBoxLayout()
+        btn_add_sh = QPushButton("➕  Hissedar Ekle")
+        btn_add_sh.setObjectName("btnSmall")
+        btn_add_sh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add_sh.clicked.connect(self._on_add_shareholder)
+        sh_btn_row.addWidget(btn_add_sh)
+
+        btn_remove_sh = QPushButton("🗑  Seçili Hissedarı Sil")
+        btn_remove_sh.setObjectName("btnRemove")
+        btn_remove_sh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_remove_sh.clicked.connect(self._on_remove_shareholder)
+        sh_btn_row.addWidget(btn_remove_sh)
+
+        sh_btn_row.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
+        sl.addLayout(sh_btn_row)
+        layout.addWidget(sh_group)
+
+        # ── Bottom buttons ─────────────────────────────────────────────
+        bottom = QHBoxLayout()
+
+        btn_delete = QPushButton("🗑  Bu Hayvanı Komple Sil")
+        btn_delete.setObjectName("btnDeleteAnimal")
+        btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_delete.clicked.connect(self._on_delete_animal)
+        bottom.addWidget(btn_delete)
+
+        bottom.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
+
+        btn_save = QPushButton("💾  Kaydet")
+        btn_save.setObjectName("btnSuccess")
+        btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_save.clicked.connect(self._on_save)
+        bottom.addWidget(btn_save)
+
+        btn_cancel = QPushButton("İptal")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.clicked.connect(self.reject)
+        bottom.addWidget(btn_cancel)
+
+        layout.addLayout(bottom)
+
+    # -- populate shareholders table --
+
+    def _populate_sh_table(self) -> None:
+        rec = self._record
+        self._sh_table.setRowCount(len(rec.shares))
+        tf = rec.total_fractions
+
+        for row, share in enumerate(rec.shares):
             self._sh_table.setItem(row, 0, QTableWidgetItem(share.phone))
             self._sh_table.setItem(row, 1, QTableWidgetItem(share.shareholder_name))
+            self._sh_table.setItem(row, 2, QTableWidgetItem(str(share.share_fraction)))
 
+            sh_price = share.price_for(rec.total_price, tf)
+            price_item = QTableWidgetItem(f"{sh_price} ₺")
+            price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            self._sh_table.setItem(row, 3, price_item)
+
+            # Payment checkbox with rollback
             cb = QCheckBox()
             cb.setChecked(share.is_paid)
             cb.setStyleSheet("margin-left: 18px;")
-            cb.setProperty("animal_id", record.animal_id)
+            cb.setProperty("animal_id", rec.animal_id)
             cb.setProperty("phone", share.phone)
             cb.stateChanged.connect(lambda _, c=cb: self._on_toggle(c))
-
             wrapper = QWidget()
             wl = QHBoxLayout(wrapper)
             wl.addWidget(cb)
             wl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             wl.setContentsMargins(0, 0, 0, 0)
-            self._sh_table.setCellWidget(row, 2, wrapper)
+            self._sh_table.setCellWidget(row, 4, wrapper)
 
-            price_item = QTableWidgetItem(f"{record.price_per_share} ₺")
-            price_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-            )
-            self._sh_table.setItem(row, 3, price_item)
+            # Select checkbox for removal
+            sel_cb = QCheckBox()
+            sel_cb.setProperty("phone", share.phone)
+            sel_wrapper = QWidget()
+            sel_layout = QHBoxLayout(sel_wrapper)
+            sel_layout.addWidget(sel_cb)
+            sel_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sel_layout.setContentsMargins(0, 0, 0, 0)
+            self._sh_table.setCellWidget(row, 5, sel_wrapper)
 
             # Row tint
             tint = QColor("#0B3D1A") if share.is_paid else QColor("#3D0B0B")
-            for c in range(2):
+            for c in (0, 1, 2, 3):
                 itm = self._sh_table.item(row, c)
                 if itm:
                     itm.setBackground(tint)
-            self._sh_table.item(row, 3).setBackground(tint)
 
-        sl.addWidget(self._sh_table)
-        layout.addWidget(sh_group)
-
-        # ── Buttons ────────────────────────────────────────────────────
-        btn_box = QDialogButtonBox()
-        btn_save = btn_box.addButton("💾  Kaydet", QDialogButtonBox.ButtonRole.AcceptRole)
-        btn_save.setObjectName("btnSuccess")
-        btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cancel = btn_box.addButton("İptal", QDialogButtonBox.ButtonRole.RejectRole)
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_box.accepted.connect(self._on_save)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
+    def _refresh_record(self) -> None:
+        """Re-fetch the record from DB and repopulate."""
+        updated = self._ctrl.search_by_animal_id(self._record.animal_id)
+        if updated is None:
+            return
+        self._record = updated
+        self._populate_sh_table()
+        self._sh_group.setTitle(f"Hissedarlar ({len(updated.shares)})")
+        self._frac_label.setText(str(updated.total_fractions))
+        self._per_price_lbl.setText(f"{updated.price_per_unit_fraction} ₺")
+        self._per_weight_lbl.setText(f"{updated.weight_per_unit_fraction} kg")
 
     # -- slots --
 
@@ -456,18 +400,7 @@ class AnimalEditDialog(QDialog):
             QMessageBox.critical(self, "Veritabanı Hatası", msg)
         else:
             self._changed = True
-            # Update row tint
-            for row in range(self._sh_table.rowCount()):
-                wrapper = self._sh_table.cellWidget(row, 2)
-                if wrapper:
-                    cb = wrapper.findChild(QCheckBox)
-                    if cb and cb.property("phone") == phone:
-                        tint = QColor("#0B3D1A") if new_state else QColor("#3D0B0B")
-                        for c in (0, 1, 3):
-                            itm = self._sh_table.item(row, c)
-                            if itm:
-                                itm.setBackground(tint)
-                        break
+            self._refresh_record()
 
     def _on_save(self) -> None:
         try:
@@ -491,9 +424,154 @@ class AnimalEditDialog(QDialog):
         else:
             QMessageBox.critical(self, "Hata", msg)
 
+    def _on_delete_animal(self) -> None:
+        reply = QMessageBox.warning(
+            self,
+            "Hayvanı Sil",
+            f"Hayvan #{self._record.animal_id} ve tüm hissedarları kalıcı olarak silinecek.\n\n"
+            "Bu işlem geri alınamaz. Emin misiniz?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        ok, msg = self._ctrl.delete_animal(self._record.animal_id)
+        if ok:
+            self._changed = True
+            self._deleted = True
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Hata", msg)
+
+    def _on_add_shareholder(self) -> None:
+        if len(self._record.shares) >= 7:
+            QMessageBox.information(self, "Bilgi", "Maksimum 7 hissedar eklenebilir.")
+            return
+
+        dlg = _AddShareholderDialog(self._record.animal_id, self._ctrl, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._changed = True
+            self._refresh_record()
+
+    def _on_remove_shareholder(self) -> None:
+        selected_phones: List[str] = []
+        for row in range(self._sh_table.rowCount()):
+            wrapper = self._sh_table.cellWidget(row, 5)
+            if wrapper:
+                cb = wrapper.findChild(QCheckBox)
+                if cb and cb.isChecked():
+                    phone = cb.property("phone")
+                    if phone:
+                        selected_phones.append(phone)
+
+        if not selected_phones:
+            QMessageBox.information(self, "Bilgi", "Lütfen silmek istediğiniz hissedarları seçin.")
+            return
+
+        remaining = len(self._record.shares) - len(selected_phones)
+        if remaining < 1:
+            QMessageBox.warning(self, "Uyarı", "En az 1 hissedar kalmalıdır.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Hissedar Sil",
+            f"{len(selected_phones)} hissedar silinecek. Emin misiniz?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        for phone in selected_phones:
+            ok, msg = self._ctrl.remove_share_from_animal(self._record.animal_id, phone)
+            if not ok:
+                QMessageBox.critical(self, "Hata", msg)
+                break
+
+        self._changed = True
+        self._refresh_record()
+
     @property
     def data_changed(self) -> bool:
         return self._changed
+
+    @property
+    def animal_deleted(self) -> bool:
+        return self._deleted
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Add-Shareholder sub-dialog
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _AddShareholderDialog(QDialog):
+    """Small dialog to add one shareholder to an existing animal."""
+
+    def __init__(
+        self, animal_id: int, ctrl: KurbanController, parent: Optional[QWidget] = None
+    ) -> None:
+        super().__init__(parent)
+        self._animal_id = animal_id
+        self._ctrl = ctrl
+
+        self.setWindowTitle("Hissedar Ekle")
+        self.setMinimumWidth(460)
+
+        layout = QGridLayout(self)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Ülke Kodu:"), 0, 0)
+        self._combo_country = QComboBox()
+        for _iso, _code, _label in COUNTRY_CODES:
+            self._combo_country.addItem(_label, _iso)
+        layout.addWidget(self._combo_country, 0, 1)
+
+        layout.addWidget(QLabel("Telefon:"), 1, 0)
+        self._edit_phone = QLineEdit()
+        self._edit_phone.setPlaceholderText("5XX XXX XX XX")
+        layout.addWidget(self._edit_phone, 1, 1)
+
+        layout.addWidget(QLabel("Ad Soyad:"), 2, 0)
+        self._edit_name = QLineEdit()
+        layout.addWidget(self._edit_name, 2, 1)
+
+        layout.addWidget(QLabel("Pay (Fraction):"), 3, 0)
+        self._spin_frac = QSpinBox()
+        self._spin_frac.setRange(1, 7)
+        self._spin_frac.setValue(1)
+        layout.addWidget(self._spin_frac, 3, 1)
+
+        layout.addWidget(QLabel("Ödendi:"), 4, 0)
+        self._cb_paid = QCheckBox()
+        layout.addWidget(self._cb_paid, 4, 1)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(self._on_ok)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box, 5, 0, 1, 2)
+
+    def _on_ok(self) -> None:
+        raw = self._edit_phone.text().strip()
+        idx = self._combo_country.currentIndex()
+        code = COUNTRY_CODES[idx][1]
+        full_phone = f"{code}{raw}" if raw and not raw.startswith("+") else raw
+        region = self._combo_country.currentData()
+
+        ok, msg = self._ctrl.add_share_to_animal(
+            animal_id=self._animal_id,
+            raw_phone=full_phone,
+            name=self._edit_name.text().strip(),
+            is_paid=self._cb_paid.isChecked(),
+            share_fraction=self._spin_frac.value(),
+            region=region,
+        )
+        if ok:
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Hata", msg)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -506,22 +584,20 @@ class MainWindow(QMainWindow):
         self._ctrl = controller
         self._export_worker: Optional[ExportWorker] = None
 
-        # Pagination state
         self._search_query: str = ""
         self._current_page: int = 1
         self._per_page: int = 50
 
         self.setWindowTitle("Kurban Takip Sistemi")
         self.setMinimumSize(1140, 760)
-        self.resize(1240, 800)
-        self.setStyleSheet(_STYLESHEET)
+        self.resize(1260, 820)
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(16, 16, 16, 8)
 
-        title = QLabel("🐄  Kurban Takip Sistemi  —  V2.0")
+        title = QLabel("🐄  Kurban Takip Sistemi  —  V2.1")
         title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         title.setStyleSheet("color: #F8FAFC; padding: 4px 0 8px 0;")
         root.addWidget(title)
@@ -537,7 +613,6 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Hazır.")
 
-    # ── Close event → auto-backup ─────────────────────────────────────
     def closeEvent(self, event) -> None:
         result = create_backup()
         if result:
@@ -553,7 +628,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setSpacing(12)
 
-        # ── Animal form ────────────────────────────────────────────────
+        # Animal form
         form_group = QGroupBox("Yeni Hayvan Bilgileri")
         fg = QGridLayout(form_group)
         fg.setSpacing(10)
@@ -577,7 +652,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(form_group)
 
-        # ── Dynamic shareholder list ───────────────────────────────────
+        # Dynamic shareholder rows
         sh_group = QGroupBox("Hissedarlar")
         sh_outer = QVBoxLayout(sh_group)
 
@@ -608,16 +683,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(sh_group)
 
         self._sh_rows: List[ShareholderRow] = []
-        # Start with 1 row
         self._add_shareholder_row()
 
-        # ── Add animal button ──────────────────────────────────────────
+        # Add animal button
         btn_add = QPushButton("➕  Hayvan Ekle (Taslaklara)")
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.clicked.connect(self._on_add_animal)
         layout.addWidget(btn_add, alignment=Qt.AlignmentFlag.AlignRight)
 
-        # ── Staging table ──────────────────────────────────────────────
+        # Staging table
         stage_group = QGroupBox("Taslak Listesi")
         stl = QVBoxLayout(stage_group)
 
@@ -662,7 +736,6 @@ class MainWindow(QMainWindow):
             return
         row = ShareholderRow(len(self._sh_rows) + 1)
         row.remove_requested.connect(self._remove_shareholder_row)
-        # Insert before the spacer
         self._sh_rows_layout.insertWidget(self._sh_rows_layout.count() - 1, row)
         self._sh_rows.append(row)
         self._update_sh_counter()
@@ -674,7 +747,6 @@ class MainWindow(QMainWindow):
         self._sh_rows.remove(row)
         self._sh_rows_layout.removeWidget(row)
         row.deleteLater()
-        # Re-index
         for i, r in enumerate(self._sh_rows):
             r.set_index(i + 1)
         self._update_sh_counter()
@@ -684,7 +756,6 @@ class MainWindow(QMainWindow):
         self._btn_add_sh.setEnabled(len(self._sh_rows) < 7)
 
     def _on_add_animal(self) -> None:
-        # Parse price / weight
         try:
             price = Decimal(self._price_input.text().strip().replace(",", "."))
         except (InvalidOperation, ValueError):
@@ -698,7 +769,6 @@ class MainWindow(QMainWindow):
 
         qd = self._date_edit.date()
         sdate = date(qd.year(), qd.month(), qd.day())
-
         shareholders = [r.to_entry() for r in self._sh_rows]
 
         ok, msg = self._ctrl.add_to_staging(sdate, price, weight, shareholders)
@@ -713,7 +783,6 @@ class MainWindow(QMainWindow):
     def _clear_reg_form(self) -> None:
         self._price_input.clear()
         self._weight_input.clear()
-        # Remove all rows but first, then clear first
         while len(self._sh_rows) > 1:
             r = self._sh_rows[-1]
             self._sh_rows.remove(r)
@@ -724,6 +793,7 @@ class MainWindow(QMainWindow):
             first.edit_phone.clear()
             first.edit_name.clear()
             first.cb_paid.setChecked(False)
+            first.spin_fraction.setValue(1)
             first.combo_country.setCurrentIndex(0)
         self._update_sh_counter()
 
@@ -737,7 +807,7 @@ class MainWindow(QMainWindow):
                 row, 2, QTableWidgetItem(f"{a.total_price} ₺ / {a.total_weight} kg")
             )
             parts = [
-                f"{sh.name} ({'✅' if sh.is_paid else '❌'})"
+                f"{sh.name} x{sh.share_fraction} ({'✅' if sh.is_paid else '❌'})"
                 for sh in a.shareholders
             ]
             self._staging_table.setItem(row, 3, QTableWidgetItem(" | ".join(parts)))
@@ -773,13 +843,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setSpacing(12)
 
-        # Search bar
         sg = QGroupBox("Arama")
         sgl = QHBoxLayout(sg)
 
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText(
-            "Hayvan ID / Telefon / İsim giriniz… (boş bırakırsanız tümünü listeler)"
+            "Hayvan ID / Telefon / İsim giriniz… (boş = tümü)"
         )
         self._search_input.returnPressed.connect(self._on_search)
         sgl.addWidget(self._search_input, 3)
@@ -791,20 +860,20 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(sg)
 
-        # Results table
         rg = QGroupBox("Sonuçlar")
         rgl = QVBoxLayout(rg)
 
-        self._results_table = QTableWidget(0, 6)
+        self._results_table = QTableWidget(0, 7)
         self._results_table.setHorizontalHeaderLabels(
-            ["Hayvan ID", "Kesim Tarihi", "Fiyat (₺)", "Ağırlık (kg)", "Hissedar Sayısı", "Durum"]
+            ["Hayvan ID", "Kesim Tarihi", "Fiyat (₺)", "Ağırlık (kg)",
+             "Hissedar", "Toplam Pay", "Durum"]
         )
         rh = self._results_table.horizontalHeader()
         assert rh is not None
-        for i in range(6):
+        for i in range(7):
             rh.setSectionResizeMode(
                 i,
-                QHeaderView.ResizeMode.Stretch if i == 5
+                QHeaderView.ResizeMode.Stretch if i == 6
                 else QHeaderView.ResizeMode.ResizeToContents,
             )
         self._results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -812,7 +881,6 @@ class MainWindow(QMainWindow):
         self._results_table.doubleClicked.connect(self._on_result_double_click)
         rgl.addWidget(self._results_table)
 
-        # Pagination bar
         pbar = QHBoxLayout()
         self._btn_prev = QPushButton("◀  Önceki")
         self._btn_prev.setObjectName("btnSmall")
@@ -833,16 +901,12 @@ class MainWindow(QMainWindow):
 
         rgl.addLayout(pbar)
 
-        # Hint label
         hint = QLabel("💡  Düzenlemek için satıra çift tıklayın.")
         hint.setStyleSheet("color: #64748B; font-size: 11px; padding: 2px;")
         rgl.addWidget(hint)
 
         layout.addWidget(rg)
-
         return tab
-
-    # -- search helpers --
 
     def _on_search(self) -> None:
         self._search_query = self._search_input.text().strip()
@@ -861,7 +925,6 @@ class MainWindow(QMainWindow):
     def _load_page(self) -> None:
         query = self._search_query
 
-        # ID search shortcut (exact match, no pagination)
         if query and query.isdigit():
             rec = self._ctrl.search_by_animal_id(int(query))
             records = [rec] if rec else []
@@ -882,7 +945,7 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("Sonuç bulunamadı.", 5000)
         else:
             self._status_bar.showMessage(
-                f"{total} hayvan bulundu, {shown} gösteriliyor (sayfa {pr.page}/{pr.total_pages}).",
+                f"{total} hayvan, {shown} gösteriliyor (sayfa {pr.page}/{pr.total_pages}).",
                 5000,
             )
 
@@ -891,45 +954,37 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._results_table.setRowCount(len(records))
         for row, rec in enumerate(records):
-            id_item = QTableWidgetItem(str(rec.animal_id))
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            _c = lambda v, align=True: self._make_centered_item(str(v))
+
+            id_item = _c(rec.animal_id)
+            id_item.setData(Qt.ItemDataRole.UserRole, rec)
             self._results_table.setItem(row, 0, id_item)
-
-            dt_item = QTableWidgetItem(rec.slaughter_date.strftime("%d.%m.%Y"))
-            dt_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            self._results_table.setItem(row, 1, dt_item)
-
-            p_item = QTableWidgetItem(f"{rec.total_price}")
-            p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            self._results_table.setItem(row, 2, p_item)
-
-            w_item = QTableWidgetItem(f"{rec.total_weight}")
-            w_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            self._results_table.setItem(row, 3, w_item)
-
-            count_item = QTableWidgetItem(str(rec.share_count))
-            count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            self._results_table.setItem(row, 4, count_item)
+            self._results_table.setItem(row, 1, _c(rec.slaughter_date.strftime("%d.%m.%Y")))
+            self._results_table.setItem(row, 2, _c(rec.total_price))
+            self._results_table.setItem(row, 3, _c(rec.total_weight))
+            self._results_table.setItem(row, 4, _c(rec.share_count))
+            self._results_table.setItem(row, 5, _c(rec.total_fractions))
 
             paid = sum(1 for s in rec.shares if s.is_paid)
             status_text = f"{paid}/{rec.share_count} ödendi"
-            st_item = QTableWidgetItem(status_text)
-            st_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            st_item = _c(status_text)
             if paid == rec.share_count:
                 st_item.setForeground(QColor("#22C55E"))
             elif paid == 0:
                 st_item.setForeground(QColor("#EF4444"))
             else:
                 st_item.setForeground(QColor("#F59E0B"))
-            self._results_table.setItem(row, 5, st_item)
+            self._results_table.setItem(row, 6, st_item)
 
-            # Store the record for double-click access
-            id_item.setData(Qt.ItemDataRole.UserRole, rec)
-
-        # Pagination controls
         self._page_label.setText(f"Sayfa {page} / {total_pages}")
         self._btn_prev.setEnabled(page > 1)
         self._btn_next.setEnabled(page < total_pages)
+
+    @staticmethod
+    def _make_centered_item(text: str) -> QTableWidgetItem:
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        return item
 
     def _on_result_double_click(self, index) -> None:
         row = index.row()
@@ -943,7 +998,7 @@ class MainWindow(QMainWindow):
         dialog = AnimalEditDialog(record, self._ctrl, self)
         dialog.exec()
         if dialog.data_changed:
-            self._load_page()  # refresh table
+            self._load_page()
 
     # ═══════════════════════════════════════════════════════════════════
     #  TAB 3 — Export
@@ -959,10 +1014,10 @@ class MainWindow(QMainWindow):
         il = QVBoxLayout(info_group)
 
         info = QLabel(
-            "Tüm hayvan ve hissedar bilgileri tek bir Excel dosyasına\n"
-            "aktarılır.  Ödeme durumuna göre hücreler renklendirilir:\n\n"
+            "Tüm hayvan ve hissedar bilgileri tek bir Excel dosyasına aktarılır.\n"
+            "Ödeme durumuna göre hücreler renklendirilir:\n\n"
             "  🟢  Yeşil = Ödendi          🔴  Kırmızı = Ödenmedi\n\n"
-            "Rapor, toplam fiyat/ağırlık ve hisse başı değerleri de içerir."
+            "Rapor: toplam fiyat/ağırlık, pay oranları ve hisse başı değerler."
         )
         info.setStyleSheet("font-size: 13px; line-height: 1.6; padding: 8px;")
         il.addWidget(info)
@@ -990,7 +1045,6 @@ class MainWindow(QMainWindow):
         layout.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         )
-
         return tab
 
     def _on_export(self) -> None:
@@ -1025,7 +1079,6 @@ class MainWindow(QMainWindow):
             )
             self._export_status.setText(message)
             self._status_bar.showMessage("Dışa aktarma tamamlandı.", 5000)
-            # Auto-backup after export
             create_backup()
         else:
             self._export_status.setStyleSheet(

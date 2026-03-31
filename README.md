@@ -1,1 +1,1 @@
-# KurbanTakip
+# Kurbandeneme
