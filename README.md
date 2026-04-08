@@ -16,6 +16,7 @@ Yerel (local) organizasyonlar, çiftlikler ve dernekler için geliştirilmiş, y
 * **Veritabanı:** SQLite3 (Repository Pattern ile izole edilmiştir)
 * **Derleme/Dağıtım:** Nuitka & Inno Setup
 
+## Kurulum ve Kullanım
 **Son Kullanıcılar İçin (Önerilen):**
 [Releases](https://github.com/ChestnutRisenKamehameha/KurbanTakip/releases) sayfasından en güncel `KurbanTakip_Kurulum.exe` dosyasını indirin ve kurun. Harici bir programa veya internet bağlantısına ihtiyaç duymaz.
 
