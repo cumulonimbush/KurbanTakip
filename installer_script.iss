@@ -1,28 +1,27 @@
 [Setup]
 ; Temel Uygulama Bilgileri
 AppName=Kurban Takip Sistemi
-AppVersion=2.1.0
-AppPublisher=akk/Þirket
+AppVersion=2.2.1
+AppPublisher=Senin AdÄ±n/Åžirketin
 DefaultDirName={autopf}\Kurban Takip
 DefaultGroupName=Kurban Takip Sistemi
 OutputDir=.\Output
-OutputBaseFilename=KurbanTakip_Kurulum_v2.1.0
+OutputBaseFilename=KurbanTakip_Kurulum_v2.2.1
 Compression=lzma2
 SolidCompression=yes
-; Kurulum sihirbazýnýn dilini Türkçe yapmak için (varsa)
-; Language=Turkish
 
 [Tasks]
-Name: "desktopicon"; Description: "Masaüstüne kýsayol oluþtur"; GroupDescription: "Ek Kýsayollar:"
+Name: "desktopicon"; Description: "MasaÃ¼stÃ¼ne kÄ±sayol oluÅŸtur"; GroupDescription: "Ek KÄ±sayollar:"
 
 [Files]
-; DÝKKAT: Buradaki "C:\Senin\Proje\Yolun\main.dist" kýsmýný KENDÝ yolunla deðiþtir.
-Source: "C:\Users\Ali Kemal\mystuff\KurbanTakip\src\main.dist\main.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\Ali Kemal\mystuff\KurbanTakip\src\main.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; DÄ°KKAT: main.dist klasÃ¶rÃ¼nÃ¼n yolunu kendi bilgisayarÄ±na gÃ¶re kontrol et. (Sonundaki \* iÅŸaretini silme!)
+Source: "C:\Workspace\Projects\KurbanTakip\src\main.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Workspace\Projects\KurbanTakip\src\main.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Kurban Takip Sistemi"; Filename: "{app}\main.exe"
 Name: "{autodesktop}\Kurban Takip Sistemi"; Filename: "{app}\main.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\main.exe"; Description: "Kurban Takip Sistemini Baþlat"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\main.exe"; Description: "Kurban Takip Sistemini BaÅŸlat"; Flags: nowait postinstall skipifsilent
+

@@ -1,14 +1,15 @@
 """
-database.py — V2.1 SQLite schema, connection management, and Repository.
+database.py — V2.2 SQLite schema, connection management, and Repository.
 
-V2.1 changes
+V2.2 changes
 -------------
-* ``animal_shares`` gains ``share_fraction INTEGER NOT NULL DEFAULT 1``.
-* Safe ``ALTER TABLE`` migration in ``initialise_database`` for existing V2.0 DBs.
-* ``_hydrate_animals`` reads ``share_fraction`` from rows.
-* ``_JOIN_SQL`` includes ``ash.share_fraction``.
-* New methods: ``add_share_to_animal``, ``remove_share_from_animal`` for
-  full CRUD in the Edit Dialog.
+* ``is_paid BOOLEAN`` → ``paid_amount_kurus INTEGER NOT NULL DEFAULT 0``
+  in ``animal_shares``.
+* Safe V2.1 → V2.2 migration via temp-table rebuild (preserves data:
+  ``is_paid=1`` maps to the shareholder's full fractional share price).
+* ``_hydrate_animals`` reads ``paid_amount_kurus`` instead of ``is_paid``.
+* ``update_payment_status`` replaced by ``update_paid_amount``.
+* New ``get_dashboard_stats()`` returning aggregated metrics via SQL.
 """
 
 from __future__ import annotations
@@ -23,11 +24,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Generator, List, Optional
 
-from models import AnimalRecord, AnimalShare, PaginatedResult, StagedAnimal
-
-# ---------------------------------------------------------------------------
-# Logger
-# ---------------------------------------------------------------------------
+from models import (
+    AnimalRecord,
+    AnimalShare,
+    DashboardStats,
+    PaginatedResult,
+    StagedAnimal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +38,7 @@ logger = logging.getLogger(__name__)
 # Nuitka-safe base path
 # ---------------------------------------------------------------------------
 
-
 def _get_app_dir() -> Path:
-    # Windows'ta güvenli veri yazma alanı: Belgelerim / KurbanTakip
     data_dir = Path.home() / "Documents" / "KurbanTakip"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
@@ -46,7 +47,7 @@ APP_DIR = _get_app_dir()
 DB_FILE = APP_DIR / "kurban.db"
 
 # ---------------------------------------------------------------------------
-# Schema
+# Schema  (V2.2 — paid_amount_kurus replaces is_paid)
 # ---------------------------------------------------------------------------
 
 _SCHEMA_SQL = """\
@@ -63,22 +64,14 @@ CREATE TABLE IF NOT EXISTS shareholders (
 );
 
 CREATE TABLE IF NOT EXISTS animal_shares (
-    animal_id       INTEGER NOT NULL,
-    phone           TEXT    NOT NULL,
-    is_paid         BOOLEAN NOT NULL DEFAULT 0,
-    share_fraction  INTEGER NOT NULL DEFAULT 1,
+    animal_id           INTEGER NOT NULL,
+    phone               TEXT    NOT NULL,
+    paid_amount_kurus   INTEGER NOT NULL DEFAULT 0,
+    share_fraction      INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (animal_id, phone),
     FOREIGN KEY (animal_id) REFERENCES animals(id)         ON DELETE CASCADE,
     FOREIGN KEY (phone)     REFERENCES shareholders(phone) ON DELETE CASCADE
 );
-"""
-
-# ---------------------------------------------------------------------------
-# V2.0 → V2.1 migration: add share_fraction if missing
-# ---------------------------------------------------------------------------
-
-_MIGRATION_SQL = """\
-ALTER TABLE animal_shares ADD COLUMN share_fraction INTEGER NOT NULL DEFAULT 1;
 """
 
 # ---------------------------------------------------------------------------
@@ -88,22 +81,17 @@ ALTER TABLE animal_shares ADD COLUMN share_fraction INTEGER NOT NULL DEFAULT 1;
 _KURUS_FACTOR = Decimal("100")
 _GRAM_FACTOR = Decimal("1000")
 
-
 def _try_to_kurus(value: Decimal) -> int:
     return int((value * _KURUS_FACTOR).to_integral_value())
-
 
 def _kurus_to_try(value: int) -> Decimal:
     return Decimal(value) / _KURUS_FACTOR
 
-
 def _kg_to_grams(value: Decimal) -> int:
     return int((value * _GRAM_FACTOR).to_integral_value())
 
-
 def _grams_to_kg(value: int) -> Decimal:
     return Decimal(value) / _GRAM_FACTOR
-
 
 # ---------------------------------------------------------------------------
 # Connection context manager
@@ -122,30 +110,89 @@ def _get_connection(
     finally:
         conn.close()
 
-
 # ---------------------------------------------------------------------------
 # Schema bootstrap + migration
 # ---------------------------------------------------------------------------
 
+def _get_column_names(conn: sqlite3.Connection, table: str) -> List[str]:
+    return [
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    ]
+
+
 def initialise_database(db_path: Path = DB_FILE) -> None:
-    """Create tables and run safe migrations for V2.0 → V2.1."""
+    """Create tables and run safe migrations for V2.0/V2.1 → V2.2."""
     with _get_connection(db_path) as conn:
+        # ── Ensure base tables exist ───────────────────────────────────
         conn.executescript(_SCHEMA_SQL)
         conn.commit()
 
-        # Safe migration: add share_fraction column if it doesn't exist yet
-        try:
-            cols = [
-                row["name"]
-                for row in conn.execute("PRAGMA table_info(animal_shares)").fetchall()
-            ]
-            if "share_fraction" not in cols:
-                conn.execute(_MIGRATION_SQL)
+        cols = _get_column_names(conn, "animal_shares")
+
+        # ── V2.0 → V2.1 migration: add share_fraction ─────────────────
+        if "share_fraction" not in cols and "is_paid" in cols:
+            try:
+                conn.execute(
+                    "ALTER TABLE animal_shares "
+                    "ADD COLUMN share_fraction INTEGER NOT NULL DEFAULT 1"
+                )
                 conn.commit()
-                logger.info("Migration: added share_fraction column to animal_shares")
-        except sqlite3.OperationalError:
-            # Column already exists or table doesn't exist yet (handled by schema above)
-            pass
+                cols.append("share_fraction")
+                logger.info("Migration V2.0→V2.1: added share_fraction")
+            except sqlite3.OperationalError:
+                pass
+
+        # ── V2.1 → V2.2 migration: is_paid → paid_amount_kurus ────────
+        if "is_paid" in cols:
+            logger.info("Migration V2.1→V2.2: converting is_paid → paid_amount_kurus")
+            # We must disable FK checks during the rebuild
+            conn.execute("PRAGMA foreign_keys=OFF")
+
+            conn.execute("""\
+                CREATE TABLE IF NOT EXISTS animal_shares_new (
+                    animal_id           INTEGER NOT NULL,
+                    phone               TEXT    NOT NULL,
+                    paid_amount_kurus   INTEGER NOT NULL DEFAULT 0,
+                    share_fraction      INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (animal_id, phone),
+                    FOREIGN KEY (animal_id) REFERENCES animals(id)         ON DELETE CASCADE,
+                    FOREIGN KEY (phone)     REFERENCES shareholders(phone) ON DELETE CASCADE
+                )
+            """)
+
+            # For is_paid=1 rows: calculate the full share price in kurus
+            # share_price_kurus = (total_price_kurus * share_fraction)
+            #                   / (sum of share_fractions for that animal)
+            conn.execute("""\
+                INSERT INTO animal_shares_new (animal_id, phone, paid_amount_kurus, share_fraction)
+                SELECT
+                    ash.animal_id,
+                    ash.phone,
+                    CASE
+                        WHEN ash.is_paid = 1
+                        THEN CAST(
+                            (a.total_price_kurus * ash.share_fraction * 1.0)
+                            / COALESCE(tf.total_frac, ash.share_fraction)
+                            AS INTEGER
+                        )
+                        ELSE 0
+                    END,
+                    ash.share_fraction
+                FROM animal_shares ash
+                JOIN animals a ON a.id = ash.animal_id
+                LEFT JOIN (
+                    SELECT animal_id, SUM(share_fraction) AS total_frac
+                    FROM animal_shares
+                    GROUP BY animal_id
+                ) tf ON tf.animal_id = ash.animal_id
+            """)
+
+            conn.execute("DROP TABLE animal_shares")
+            conn.execute("ALTER TABLE animal_shares_new RENAME TO animal_shares")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.commit()
+            logger.info("Migration V2.1→V2.2 complete: is_paid converted to paid_amount_kurus")
 
     logger.info("Database initialised at %s", db_path)
 
@@ -155,7 +202,6 @@ def initialise_database(db_path: Path = DB_FILE) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class KurbanRepository:
-    """Data-access layer — every SQL statement lives here and only here."""
 
     def __init__(self, db_path: Path = DB_FILE) -> None:
         self._db_path = db_path
@@ -163,7 +209,6 @@ class KurbanRepository:
     # ── WRITE ────────────────────────────────────────────────────────────
 
     def commit_staged_animals(self, staged: List[StagedAnimal]) -> List[int]:
-        """Persist a full batch inside one transaction."""
         inserted_ids: List[int] = []
         with _get_connection(self._db_path) as conn:
             cursor = conn.cursor()
@@ -192,9 +237,14 @@ class KurbanRepository:
                         )
                         cursor.execute(
                             "INSERT INTO animal_shares "
-                            "(animal_id, phone, is_paid, share_fraction) "
+                            "(animal_id, phone, paid_amount_kurus, share_fraction) "
                             "VALUES (?, ?, ?, ?)",
-                            (animal_id, sh.phone, int(sh.is_paid), sh.share_fraction),
+                            (
+                                animal_id,
+                                sh.phone,
+                                _try_to_kurus(sh.paid_amount),
+                                sh.share_fraction,
+                            ),
                         )
                 conn.commit()
                 logger.info(
@@ -206,19 +256,20 @@ class KurbanRepository:
                 raise
         return inserted_ids
 
-    def update_payment_status(
-        self, animal_id: int, phone: str, is_paid: bool
+    def update_paid_amount(
+        self, animal_id: int, phone: str, paid_amount: Decimal
     ) -> None:
+        """Update the paid amount (in TRY) for one shareholder."""
         with _get_connection(self._db_path) as conn:
             conn.execute(
-                "UPDATE animal_shares SET is_paid = ? "
+                "UPDATE animal_shares SET paid_amount_kurus = ? "
                 "WHERE animal_id = ? AND phone = ?",
-                (int(is_paid), animal_id, phone),
+                (_try_to_kurus(paid_amount), animal_id, phone),
             )
             conn.commit()
         logger.info(
-            "Payment updated: animal=%d phone=%s is_paid=%s",
-            animal_id, phone, is_paid,
+            "Paid amount updated: animal=%d phone=%s amount=%s",
+            animal_id, phone, paid_amount,
         )
 
     def update_animal(
@@ -243,23 +294,21 @@ class KurbanRepository:
         logger.info("Animal %d updated", animal_id)
 
     def delete_animal(self, animal_id: int) -> None:
-        """Delete an animal — CASCADE removes its shares automatically."""
         with _get_connection(self._db_path) as conn:
             conn.execute("DELETE FROM animals WHERE id = ?", (animal_id,))
             conn.commit()
         logger.info("Animal %d deleted (cascaded shares)", animal_id)
 
-    # ── V2.1 — Share-level CRUD ─────────────────────────────────────────
+    # ── Share-level CRUD ─────────────────────────────────────────────────
 
     def add_share_to_animal(
         self,
         animal_id: int,
         phone: str,
         name: str,
-        is_paid: bool,
+        paid_amount: Decimal,
         share_fraction: int = 1,
     ) -> None:
-        """Add a new shareholder to an existing animal."""
         with _get_connection(self._db_path) as conn:
             cursor = conn.cursor()
             try:
@@ -271,21 +320,20 @@ class KurbanRepository:
                 )
                 cursor.execute(
                     "INSERT INTO animal_shares "
-                    "(animal_id, phone, is_paid, share_fraction) "
+                    "(animal_id, phone, paid_amount_kurus, share_fraction) "
                     "VALUES (?, ?, ?, ?)",
-                    (animal_id, phone, int(is_paid), share_fraction),
+                    (animal_id, phone, _try_to_kurus(paid_amount), share_fraction),
                 )
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
         logger.info(
-            "Share added: animal=%d phone=%s fraction=%d",
-            animal_id, phone, share_fraction,
+            "Share added: animal=%d phone=%s fraction=%d paid=%s",
+            animal_id, phone, share_fraction, paid_amount,
         )
 
     def remove_share_from_animal(self, animal_id: int, phone: str) -> None:
-        """Remove a single shareholder from an animal."""
         with _get_connection(self._db_path) as conn:
             conn.execute(
                 "DELETE FROM animal_shares WHERE animal_id = ? AND phone = ?",
@@ -294,19 +342,70 @@ class KurbanRepository:
             conn.commit()
         logger.info("Share removed: animal=%d phone=%s", animal_id, phone)
 
+    def update_share_in_animal(
+        self,
+        animal_id: int,
+        old_phone: str,
+        new_phone: str,
+        new_name: str,
+        paid_amount: Decimal,
+        share_fraction: int,
+    ) -> None:
+        """Update an existing share.  Handles phone (PK) change safely."""
+        with _get_connection(self._db_path) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN")
+                # Upsert the (possibly new) shareholder record
+                cursor.execute(
+                    "INSERT INTO shareholders (phone, name) VALUES (?, ?) "
+                    "ON CONFLICT(phone) DO UPDATE SET name=excluded.name",
+                    (new_phone, new_name),
+                )
+                if old_phone == new_phone:
+                    # Simple in-place update — no PK change
+                    cursor.execute(
+                        "UPDATE animal_shares "
+                        "SET paid_amount_kurus = ?, share_fraction = ? "
+                        "WHERE animal_id = ? AND phone = ?",
+                        (_try_to_kurus(paid_amount), share_fraction,
+                         animal_id, old_phone),
+                    )
+                else:
+                    # Phone changed → delete old row, insert new one
+                    cursor.execute(
+                        "DELETE FROM animal_shares "
+                        "WHERE animal_id = ? AND phone = ?",
+                        (animal_id, old_phone),
+                    )
+                    cursor.execute(
+                        "INSERT INTO animal_shares "
+                        "(animal_id, phone, paid_amount_kurus, share_fraction) "
+                        "VALUES (?, ?, ?, ?)",
+                        (animal_id, new_phone,
+                         _try_to_kurus(paid_amount), share_fraction),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        logger.info(
+            "Share updated: animal=%d old_phone=%s new_phone=%s fraction=%d paid=%s",
+            animal_id, old_phone, new_phone, share_fraction, paid_amount,
+        )
+
     # ── READ ─────────────────────────────────────────────────────────────
 
     _JOIN_SQL = (
         "SELECT a.id, a.slaughter_date, "
         "       a.total_price_kurus, a.total_weight_grams, "
-        "       ash.phone, s.name, ash.is_paid, ash.share_fraction "
+        "       ash.phone, s.name, ash.paid_amount_kurus, ash.share_fraction "
         "FROM animals a "
         "JOIN animal_shares ash ON ash.animal_id = a.id "
         "JOIN shareholders  s   ON s.phone = ash.phone "
     )
 
     def _hydrate_animals(self, rows: list) -> List[AnimalRecord]:
-        """Group flat joined rows into ``AnimalRecord`` objects."""
         if not rows:
             return []
 
@@ -340,7 +439,7 @@ class KurbanRepository:
                     animal_id=aid,
                     phone=row["phone"],
                     shareholder_name=row["name"],
-                    is_paid=bool(row["is_paid"]),
+                    paid_amount=_kurus_to_try(row["paid_amount_kurus"]),
                     share_fraction=row["share_fraction"],
                 )
             )
@@ -478,3 +577,43 @@ class KurbanRepository:
                 self._JOIN_SQL + "ORDER BY a.id, ash.rowid"
             ).fetchall()
         return self._hydrate_animals(rows)
+
+    # ── DASHBOARD STATS (pure SQL, no record hydration) ──────────────────
+
+    def get_dashboard_stats(self) -> DashboardStats:
+        """Efficient SQL aggregation — never loads full records into memory."""
+        with _get_connection(self._db_path) as conn:
+            # Total animals
+            r1 = conn.execute("SELECT COUNT(*) AS cnt FROM animals").fetchone()
+            total_animals = r1["cnt"] if r1 else 0
+
+            # Expected revenue
+            r2 = conn.execute(
+                "SELECT COALESCE(SUM(total_price_kurus), 0) AS total FROM animals"
+            ).fetchone()
+            expected_revenue_kurus = r2["total"]
+
+            # Share-level aggregates
+            r3 = conn.execute(
+                "SELECT "
+                "  COUNT(*)                            AS sold_shares, "
+                "  COALESCE(SUM(share_fraction), 0)    AS total_fracs, "
+                "  COALESCE(SUM(paid_amount_kurus), 0) AS collected "
+                "FROM animal_shares"
+            ).fetchone()
+            sold_shares = r3["sold_shares"]
+            total_fractions_sold = r3["total_fracs"]
+            collected_amount_kurus = r3["collected"]
+
+        capacity = total_animals * 7
+        unsold = capacity - sold_shares
+
+        return DashboardStats(
+            total_animals=total_animals,
+            total_share_capacity=capacity,
+            sold_shares=sold_shares,
+            total_fractions_sold=total_fractions_sold,
+            expected_revenue_kurus=expected_revenue_kurus,
+            collected_amount_kurus=collected_amount_kurus,
+            unsold_shares=max(0, unsold),
+        )

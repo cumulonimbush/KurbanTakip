@@ -1,14 +1,13 @@
 """
-gui.py — V2.1 PyQt6 interface for the Kurban Tracking Application.
+gui.py — V2.2 PyQt6 interface for the Kurban Tracking Application.
 
-V2.1 changes
+V2.2 changes
 -------------
-* **Stylesheet extracted** to ``style.qss`` — no ``_STYLESHEET`` string here.
-* **Dynamic country codes** from ``phonenumbers.SUPPORTED_REGIONS``
-  (TR pinned at top, rest alphabetical).
-* **Fractional shares** via ``QSpinBox`` (1–7) in Registration and Edit Dialog.
-* **Full CRUD in Edit Dialog**: "Delete Animal", "Add Shareholder",
-  "Remove Selected Shareholder" buttons.
+* **Dashboard tab** ("📊 Pano") as the first/default tab with real-time
+  capacity + financial aggregates.
+* **Partial payments**: QLineEdit "Alınan (₺)" replaces QCheckBox "Ödendi"
+  in Registration, Edit Dialog, and Add-Shareholder dialog.
+* Payment status colour: Green (paid), Orange (partial/kapora), Red (unpaid).
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import (
 from backup import create_backup
 from controller import KurbanController
 from export import generate_excel_report
-from models import AnimalRecord, StagedShareholderEntry
+from models import AnimalRecord, DashboardStats, PaymentStatus, StagedShareholderEntry
 
 logger = logging.getLogger(__name__)
 
@@ -66,48 +66,36 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _build_country_codes() -> List[Tuple[str, str, str]]:
-    """Return ``[(iso, dial_code, display_label), ...]``.
-
-    TR is pinned at the top; everything else is alphabetical by ISO code.
-    """
     entries: List[Tuple[str, str, str]] = []
     for region in sorted(phonenumbers.SUPPORTED_REGIONS):
         code = phonenumbers.country_code_for_region(region)
-        label = f"{region} (+{code})"
-        entries.append((region, f"+{code}", label))
-
-    # Pin TR at top
-    tr_entry: Optional[Tuple[str, str, str]] = None
-    rest: List[Tuple[str, str, str]] = []
-    for entry in entries:
-        if entry[0] == "TR":
-            tr_entry = entry
+        entries.append((region, f"+{code}", f"{region} (+{code})"))
+    tr_entry = None
+    rest = []
+    for e in entries:
+        if e[0] == "TR":
+            tr_entry = e
         else:
-            rest.append(entry)
-
-    if tr_entry:
-        return [tr_entry] + rest
-    return rest
+            rest.append(e)
+    return ([tr_entry] if tr_entry else []) + rest
 
 
 COUNTRY_CODES = _build_country_codes()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Export worker (background thread)
+# Export worker
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ExportWorker(QThread):
     finished = pyqtSignal(bool, str)
 
-    def __init__(
-        self, records: List[AnimalRecord], dest: Path, parent: Optional[QWidget] = None
-    ) -> None:
+    def __init__(self, records, dest, parent=None):
         super().__init__(parent)
         self._records = records
         self._dest = dest
 
-    def run(self) -> None:
+    def run(self):
         try:
             generate_excel_report(self._records, self._dest)
             self.finished.emit(True, f"Rapor başarıyla dışa aktarıldı:\n{self._dest}")
@@ -117,15 +105,15 @@ class ExportWorker(QThread):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Shareholder input row widget
+# Shareholder input row  (Registration tab)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ShareholderRow(QWidget):
-    """[idx] [country] [phone] [name] [fraction spinbox] [paid] [✕]"""
+    """[idx] [country] [phone] [name] [fraction] [alınan ₺] [✕]"""
 
     remove_requested = pyqtSignal(object)
 
-    def __init__(self, index: int, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, index: int, parent=None):
         super().__init__(parent)
         self.index = index
         layout = QHBoxLayout(self)
@@ -161,49 +149,49 @@ class ShareholderRow(QWidget):
         self.spin_fraction.setToolTip("Hisse payı (1–7)")
         layout.addWidget(self.spin_fraction)
 
-        self.cb_paid = QCheckBox("Ödendi")
-        layout.addWidget(self.cb_paid)
+        # V2.2: replaces QCheckBox
+        self.edit_paid = QLineEdit("0")
+        self.edit_paid.setPlaceholderText("Alınan ₺")
+        self.edit_paid.setFixedWidth(100)
+        self.edit_paid.setToolTip("Alınan tutar (₺)")
+        layout.addWidget(self.edit_paid)
 
         btn_remove = QPushButton("✕")
         btn_remove.setObjectName("btnRemove")
         btn_remove.setFixedSize(28, 28)
         btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_remove.setToolTip("Bu hissedarı kaldır")
         btn_remove.clicked.connect(lambda: self.remove_requested.emit(self))
         layout.addWidget(btn_remove)
-
-    @property
-    def region(self) -> str:
-        return self.combo_country.currentData()
 
     def to_entry(self) -> StagedShareholderEntry:
         raw = self.edit_phone.text().strip()
         idx = self.combo_country.currentIndex()
         code = COUNTRY_CODES[idx][1]
         full_phone = f"{code}{raw}" if raw and not raw.startswith("+") else raw
+
+        try:
+            paid = Decimal(self.edit_paid.text().strip().replace(",", "."))
+        except (InvalidOperation, ValueError):
+            paid = Decimal("0")
+
         return StagedShareholderEntry(
             phone=full_phone,
             name=self.edit_name.text().strip(),
-            is_paid=self.cb_paid.isChecked(),
+            paid_amount=paid,
             share_fraction=self.spin_fraction.value(),
         )
 
-    def set_index(self, idx: int) -> None:
+    def set_index(self, idx: int):
         self.index = idx
         self.lbl_idx.setText(str(idx))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Edit modal dialog  (V2.1 — Full CRUD)
+# Edit modal dialog  (V2.2 — partial payments, full CRUD)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class AnimalEditDialog(QDialog):
-    """Modal for editing an animal: update fields, toggle payments,
-    add/remove shareholders, or delete the whole animal."""
-
-    def __init__(
-        self, record: AnimalRecord, ctrl: KurbanController, parent: Optional[QWidget] = None
-    ) -> None:
+    def __init__(self, record: AnimalRecord, ctrl: KurbanController, parent=None):
         super().__init__(parent)
         self._record = record
         self._ctrl = ctrl
@@ -211,7 +199,7 @@ class AnimalEditDialog(QDialog):
         self._deleted = False
 
         self.setWindowTitle(f"Hayvan #{record.animal_id} — Düzenle")
-        self.setMinimumWidth(780)
+        self.setMinimumWidth(820)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -219,7 +207,6 @@ class AnimalEditDialog(QDialog):
         # ── Animal info ────────────────────────────────────────────────
         info_group = QGroupBox("Hayvan Bilgileri")
         ig = QGridLayout(info_group)
-
         ig.addWidget(QLabel("Hayvan ID:"), 0, 0)
         ig.addWidget(QLabel(str(record.animal_id)), 0, 1)
 
@@ -250,11 +237,6 @@ class AnimalEditDialog(QDialog):
         self._per_price_lbl.setStyleSheet("color: #22C55E; font-weight: bold;")
         ig.addWidget(self._per_price_lbl, 5, 1)
 
-        ig.addWidget(QLabel("Birim Pay Ağırlık:"), 6, 0)
-        self._per_weight_lbl = QLabel(f"{record.weight_per_unit_fraction} kg")
-        self._per_weight_lbl.setStyleSheet("color: #22C55E; font-weight: bold;")
-        ig.addWidget(self._per_weight_lbl, 6, 1)
-
         layout.addWidget(info_group)
 
         # ── Shareholders table ─────────────────────────────────────────
@@ -262,30 +244,35 @@ class AnimalEditDialog(QDialog):
         self._sh_group = sh_group
         sl = QVBoxLayout(sh_group)
 
-        self._sh_table = QTableWidget(len(record.shares), 6)
+        self._sh_table = QTableWidget(len(record.shares), 7)
         self._sh_table.setHorizontalHeaderLabels(
-            ["Telefon", "Ad Soyad", "Pay", "Hisse Fiyat", "Ödendi", "Seç"]
+            ["Telefon", "Ad Soyad", "Pay", "Hisse Fiyat", "Alınan (₺)", "Durum", "Seç"]
         )
         hh = self._sh_table.horizontalHeader()
         assert hh is not None
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        for i in range(2, 7):
+            hh.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         self._sh_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._sh_table.verticalHeader().setDefaultSectionSize(40)
 
         self._populate_sh_table()
         sl.addWidget(self._sh_table)
 
-        # Add / Remove shareholder buttons
+        # Add / Remove buttons
         sh_btn_row = QHBoxLayout()
         btn_add_sh = QPushButton("➕  Hissedar Ekle")
         btn_add_sh.setObjectName("btnSmall")
         btn_add_sh.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add_sh.clicked.connect(self._on_add_shareholder)
         sh_btn_row.addWidget(btn_add_sh)
+
+        btn_edit_sh = QPushButton("✏️  Seçili Hissedarı Düzenle")
+        btn_edit_sh.setObjectName("btnSmall")
+        btn_edit_sh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_edit_sh.clicked.connect(self._on_edit_shareholder)
+        sh_btn_row.addWidget(btn_edit_sh)
 
         btn_remove_sh = QPushButton("🗑  Seçili Hissedarı Sil")
         btn_remove_sh.setObjectName("btnRemove")
@@ -301,7 +288,6 @@ class AnimalEditDialog(QDialog):
 
         # ── Bottom buttons ─────────────────────────────────────────────
         bottom = QHBoxLayout()
-
         btn_delete = QPushButton("🗑  Bu Hayvanı Komple Sil")
         btn_delete.setObjectName("btnDeleteAnimal")
         btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -325,9 +311,7 @@ class AnimalEditDialog(QDialog):
 
         layout.addLayout(bottom)
 
-    # -- populate shareholders table --
-
-    def _populate_sh_table(self) -> None:
+    def _populate_sh_table(self):
         rec = self._record
         self._sh_table.setRowCount(len(rec.shares))
         tf = rec.total_fractions
@@ -342,19 +326,28 @@ class AnimalEditDialog(QDialog):
             price_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             self._sh_table.setItem(row, 3, price_item)
 
-            # Payment checkbox with rollback
-            cb = QCheckBox()
-            cb.setChecked(share.is_paid)
-            cb.setStyleSheet("margin-left: 18px;")
-            cb.setProperty("animal_id", rec.animal_id)
-            cb.setProperty("phone", share.phone)
-            cb.stateChanged.connect(lambda _, c=cb: self._on_toggle(c))
-            wrapper = QWidget()
-            wl = QHBoxLayout(wrapper)
-            wl.addWidget(cb)
-            wl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            wl.setContentsMargins(0, 0, 0, 0)
-            self._sh_table.setCellWidget(row, 4, wrapper)
+            # Paid amount — editable QLineEdit
+            paid_edit = QLineEdit(str(share.paid_amount))
+            paid_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            paid_edit.setProperty("animal_id", rec.animal_id)
+            paid_edit.setProperty("phone", share.phone)
+            paid_edit.editingFinished.connect(lambda e=paid_edit: self._on_paid_changed(e))
+            self._sh_table.setCellWidget(row, 4, paid_edit)
+
+            # Status label
+            status = share.payment_status(rec.total_price, tf)
+            status_item = QTableWidgetItem()
+            if status == PaymentStatus.PAID:
+                status_item.setText("✅ Ödendi")
+                status_item.setForeground(QColor("#22C55E"))
+            elif status == PaymentStatus.PARTIAL:
+                status_item.setText("🟡 Kapora")
+                status_item.setForeground(QColor("#F59E0B"))
+            else:
+                status_item.setText("❌ Ödenmedi")
+                status_item.setForeground(QColor("#EF4444"))
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            self._sh_table.setItem(row, 5, status_item)
 
             # Select checkbox for removal
             sel_cb = QCheckBox()
@@ -364,17 +357,21 @@ class AnimalEditDialog(QDialog):
             sel_layout.addWidget(sel_cb)
             sel_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             sel_layout.setContentsMargins(0, 0, 0, 0)
-            self._sh_table.setCellWidget(row, 5, sel_wrapper)
+            self._sh_table.setCellWidget(row, 6, sel_wrapper)
 
             # Row tint
-            tint = QColor("#0B3D1A") if share.is_paid else QColor("#3D0B0B")
-            for c in (0, 1, 2, 3):
+            if status == PaymentStatus.PAID:
+                tint = QColor("#0B3D1A")
+            elif status == PaymentStatus.PARTIAL:
+                tint = QColor("#3D2F0B")
+            else:
+                tint = QColor("#3D0B0B")
+            for c in (0, 1, 2, 3, 5):
                 itm = self._sh_table.item(row, c)
                 if itm:
                     itm.setBackground(tint)
 
-    def _refresh_record(self) -> None:
-        """Re-fetch the record from DB and repopulate."""
+    def _refresh_record(self):
         updated = self._ctrl.search_by_animal_id(self._record.animal_id)
         if updated is None:
             return
@@ -383,40 +380,36 @@ class AnimalEditDialog(QDialog):
         self._sh_group.setTitle(f"Hissedarlar ({len(updated.shares)})")
         self._frac_label.setText(str(updated.total_fractions))
         self._per_price_lbl.setText(f"{updated.price_per_unit_fraction} ₺")
-        self._per_weight_lbl.setText(f"{updated.weight_per_unit_fraction} kg")
 
-    # -- slots --
+    def _on_paid_changed(self, edit: QLineEdit):
+        animal_id = edit.property("animal_id")
+        phone = edit.property("phone")
+        try:
+            amount = Decimal(edit.text().strip().replace(",", "."))
+        except (InvalidOperation, ValueError):
+            QMessageBox.warning(self, "Hata", "Geçersiz tutar.")
+            self._refresh_record()
+            return
 
-    def _on_toggle(self, checkbox: QCheckBox) -> None:
-        animal_id: int = checkbox.property("animal_id")
-        phone: str = checkbox.property("phone")
-        new_state: bool = checkbox.isChecked()
-
-        ok, msg = self._ctrl.toggle_payment(animal_id, phone, new_state)
+        ok, msg = self._ctrl.update_paid_amount(animal_id, phone, amount)
         if not ok:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(not new_state)
-            checkbox.blockSignals(False)
-            QMessageBox.critical(self, "Veritabanı Hatası", msg)
+            QMessageBox.critical(self, "Hata", msg)
         else:
             self._changed = True
-            self._refresh_record()
+        self._refresh_record()
 
-    def _on_save(self) -> None:
+    def _on_save(self):
         try:
             price = Decimal(self._price_edit.text().strip().replace(",", "."))
             weight = Decimal(self._weight_edit.text().strip().replace(",", "."))
         except (InvalidOperation, ValueError):
             QMessageBox.warning(self, "Hata", "Fiyat veya ağırlık geçersiz.")
             return
-
         if price <= 0 or weight <= 0:
             QMessageBox.warning(self, "Hata", "Fiyat ve ağırlık sıfırdan büyük olmalı.")
             return
-
         qd = self._date_edit.date()
         sdate = date(qd.year(), qd.month(), qd.day())
-
         ok, msg = self._ctrl.update_animal(self._record.animal_id, sdate, price, weight)
         if ok:
             self._changed = True
@@ -424,10 +417,9 @@ class AnimalEditDialog(QDialog):
         else:
             QMessageBox.critical(self, "Hata", msg)
 
-    def _on_delete_animal(self) -> None:
+    def _on_delete_animal(self):
         reply = QMessageBox.warning(
-            self,
-            "Hayvanı Sil",
+            self, "Hayvanı Sil",
             f"Hayvan #{self._record.animal_id} ve tüm hissedarları kalıcı olarak silinecek.\n\n"
             "Bu işlem geri alınamaz. Emin misiniz?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -435,7 +427,6 @@ class AnimalEditDialog(QDialog):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-
         ok, msg = self._ctrl.delete_animal(self._record.animal_id)
         if ok:
             self._changed = True
@@ -444,77 +435,91 @@ class AnimalEditDialog(QDialog):
         else:
             QMessageBox.critical(self, "Hata", msg)
 
-    def _on_add_shareholder(self) -> None:
+    def _on_add_shareholder(self):
         if len(self._record.shares) >= 7:
-            QMessageBox.information(self, "Bilgi", "Maksimum 7 hissedar eklenebilir.")
+            QMessageBox.information(self, "Bilgi", "Maksimum 7 hissedar.")
             return
-
         dlg = _AddShareholderDialog(self._record.animal_id, self._ctrl, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._changed = True
             self._refresh_record()
 
-    def _on_remove_shareholder(self) -> None:
-        selected_phones: List[str] = []
+    def _on_remove_shareholder(self):
+        selected_phones = []
         for row in range(self._sh_table.rowCount()):
-            wrapper = self._sh_table.cellWidget(row, 5)
+            wrapper = self._sh_table.cellWidget(row, 6)
             if wrapper:
                 cb = wrapper.findChild(QCheckBox)
                 if cb and cb.isChecked():
                     phone = cb.property("phone")
                     if phone:
                         selected_phones.append(phone)
-
         if not selected_phones:
             QMessageBox.information(self, "Bilgi", "Lütfen silmek istediğiniz hissedarları seçin.")
             return
-
-        remaining = len(self._record.shares) - len(selected_phones)
-        if remaining < 1:
+        if len(self._record.shares) - len(selected_phones) < 1:
             QMessageBox.warning(self, "Uyarı", "En az 1 hissedar kalmalıdır.")
             return
-
         reply = QMessageBox.question(
-            self,
-            "Hissedar Sil",
+            self, "Hissedar Sil",
             f"{len(selected_phones)} hissedar silinecek. Emin misiniz?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-
         for phone in selected_phones:
             ok, msg = self._ctrl.remove_share_from_animal(self._record.animal_id, phone)
             if not ok:
                 QMessageBox.critical(self, "Hata", msg)
                 break
-
         self._changed = True
         self._refresh_record()
 
+    def _on_edit_shareholder(self):
+        selected_phones = []
+        for row in range(self._sh_table.rowCount()):
+            wrapper = self._sh_table.cellWidget(row, 6)
+            if wrapper:
+                cb = wrapper.findChild(QCheckBox)
+                if cb and cb.isChecked():
+                    phone = cb.property("phone")
+                    if phone:
+                        selected_phones.append(phone)
+        if len(selected_phones) != 1:
+            QMessageBox.information(
+                self, "Bilgi",
+                "Lütfen düzenlemek istediğiniz tek bir hissedarı seçin.",
+            )
+            return
+        target_phone = selected_phones[0]
+        share = next((s for s in self._record.shares if s.phone == target_phone), None)
+        if share is None:
+            return
+        dlg = _EditShareholderDialog(
+            self._record.animal_id, share, self._ctrl, self
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._changed = True
+            self._refresh_record()
+
     @property
-    def data_changed(self) -> bool:
+    def data_changed(self):
         return self._changed
 
     @property
-    def animal_deleted(self) -> bool:
+    def animal_deleted(self):
         return self._deleted
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Add-Shareholder sub-dialog
+# Add-Shareholder sub-dialog  (V2.2)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class _AddShareholderDialog(QDialog):
-    """Small dialog to add one shareholder to an existing animal."""
-
-    def __init__(
-        self, animal_id: int, ctrl: KurbanController, parent: Optional[QWidget] = None
-    ) -> None:
+    def __init__(self, animal_id, ctrl, parent=None):
         super().__init__(parent)
         self._animal_id = animal_id
         self._ctrl = ctrl
-
         self.setWindowTitle("Hissedar Ekle")
         self.setMinimumWidth(460)
 
@@ -542,9 +547,9 @@ class _AddShareholderDialog(QDialog):
         self._spin_frac.setValue(1)
         layout.addWidget(self._spin_frac, 3, 1)
 
-        layout.addWidget(QLabel("Ödendi:"), 4, 0)
-        self._cb_paid = QCheckBox()
-        layout.addWidget(self._cb_paid, 4, 1)
+        layout.addWidget(QLabel("Alınan (₺):"), 4, 0)
+        self._edit_paid = QLineEdit("0")
+        layout.addWidget(self._edit_paid, 4, 1)
 
         btn_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -553,18 +558,23 @@ class _AddShareholderDialog(QDialog):
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box, 5, 0, 1, 2)
 
-    def _on_ok(self) -> None:
+    def _on_ok(self):
         raw = self._edit_phone.text().strip()
         idx = self._combo_country.currentIndex()
         code = COUNTRY_CODES[idx][1]
         full_phone = f"{code}{raw}" if raw and not raw.startswith("+") else raw
         region = self._combo_country.currentData()
 
+        try:
+            paid = Decimal(self._edit_paid.text().strip().replace(",", "."))
+        except (InvalidOperation, ValueError):
+            paid = Decimal("0")
+
         ok, msg = self._ctrl.add_share_to_animal(
             animal_id=self._animal_id,
             raw_phone=full_phone,
             name=self._edit_name.text().strip(),
-            is_paid=self._cb_paid.isChecked(),
+            paid_amount=paid,
             share_fraction=self._spin_frac.value(),
             region=region,
         )
@@ -575,29 +585,155 @@ class _AddShareholderDialog(QDialog):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Edit-Shareholder sub-dialog  (V2.2.1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _EditShareholderDialog(QDialog):
+    """Pre-populated dialog for editing an existing shareholder on an animal."""
+
+    def __init__(self, animal_id: int, share, ctrl, parent=None):
+        super().__init__(parent)
+        self._animal_id = animal_id
+        self._old_phone = share.phone
+        self._ctrl = ctrl
+        self.setWindowTitle("Hissedar Düzenle")
+        self.setMinimumWidth(460)
+
+        layout = QGridLayout(self)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Ülke Kodu:"), 0, 0)
+        self._combo_country = QComboBox()
+        for _iso, _code, _label in COUNTRY_CODES:
+            self._combo_country.addItem(_label, _iso)
+        layout.addWidget(self._combo_country, 0, 1)
+
+        layout.addWidget(QLabel("Telefon:"), 1, 0)
+        self._edit_phone = QLineEdit()
+        self._edit_phone.setPlaceholderText("5XX XXX XX XX")
+        layout.addWidget(self._edit_phone, 1, 1)
+
+        # Pre-populate phone: strip the country code prefix for display
+        self._edit_phone.setText(share.phone)
+
+        layout.addWidget(QLabel("Ad Soyad:"), 2, 0)
+        self._edit_name = QLineEdit(share.shareholder_name)
+        layout.addWidget(self._edit_name, 2, 1)
+
+        layout.addWidget(QLabel("Pay (Fraction):"), 3, 0)
+        self._spin_frac = QSpinBox()
+        self._spin_frac.setRange(1, 7)
+        self._spin_frac.setValue(share.share_fraction)
+        layout.addWidget(self._spin_frac, 3, 1)
+
+        layout.addWidget(QLabel("Alınan (₺):"), 4, 0)
+        self._edit_paid = QLineEdit(str(share.paid_amount))
+        layout.addWidget(self._edit_paid, 4, 1)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(self._on_ok)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box, 5, 0, 1, 2)
+
+    def _on_ok(self):
+        raw = self._edit_phone.text().strip()
+        idx = self._combo_country.currentIndex()
+        code = COUNTRY_CODES[idx][1]
+        # If the user typed the full E.164 phone (starts with +), use as-is
+        full_phone = f"{code}{raw}" if raw and not raw.startswith("+") else raw
+        region = self._combo_country.currentData()
+
+        try:
+            paid = Decimal(self._edit_paid.text().strip().replace(",", "."))
+        except (InvalidOperation, ValueError):
+            paid = Decimal("0")
+
+        ok, msg = self._ctrl.update_share_in_animal(
+            animal_id=self._animal_id,
+            old_phone=self._old_phone,
+            new_raw_phone=full_phone,
+            new_name=self._edit_name.text().strip(),
+            paid_amount=paid,
+            share_fraction=self._spin_frac.value(),
+            region=region,
+        )
+        if ok:
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Hata", msg)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dashboard metric card widget
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _MetricCard(QFrame):
+    """A single KPI card with title, big value, and optional subtitle."""
+
+    def __init__(self, title: str, value: str, subtitle: str = "",
+                 accent: str = "#3B82F6", parent=None):
+        super().__init__(parent)
+        self.setObjectName("metricCard")
+        self.setStyleSheet(f"""
+            QFrame#metricCard {{
+                background: #1E293B;
+                border: 1px solid #334155;
+                border-radius: 12px;
+                border-left: 4px solid {accent};
+                padding: 16px;
+            }}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(16, 14, 16, 14)
+
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: 600;")
+        layout.addWidget(lbl_title)
+
+        self._lbl_value = QLabel(value)
+        self._lbl_value.setStyleSheet(
+            f"color: {accent}; font-size: 28px; font-weight: 700; padding: 2px 0;"
+        )
+        layout.addWidget(self._lbl_value)
+
+        self._lbl_sub = QLabel(subtitle)
+        self._lbl_sub.setStyleSheet("color: #64748B; font-size: 11px;")
+        if subtitle:
+            layout.addWidget(self._lbl_sub)
+
+    def update_value(self, value: str, subtitle: str = ""):
+        self._lbl_value.setText(value)
+        if subtitle:
+            self._lbl_sub.setText(subtitle)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main window
 # ═══════════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
-    def __init__(self, controller: KurbanController) -> None:
+    def __init__(self, controller: KurbanController):
         super().__init__()
         self._ctrl = controller
         self._export_worker: Optional[ExportWorker] = None
 
-        self._search_query: str = ""
-        self._current_page: int = 1
-        self._per_page: int = 50
+        self._search_query = ""
+        self._current_page = 1
+        self._per_page = 50
 
         self.setWindowTitle("Kurban Takip Sistemi")
-        self.setMinimumSize(1140, 760)
-        self.resize(1260, 820)
+        self.setMinimumSize(1140, 780)
+        self.resize(1280, 840)
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(16, 16, 16, 8)
 
-        title = QLabel("🐄  Kurban Takip Sistemi  —  V2.1")
+        title = QLabel("Kurban Takip Sistemi  —  V2.2")
         title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         title.setStyleSheet("color: #F8FAFC; padding: 4px 0 8px 0;")
         root.addWidget(title)
@@ -605,19 +741,122 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         root.addWidget(self._tabs)
 
+        # Dashboard is now the FIRST (default) tab
+        self._tabs.addTab(self._build_dashboard_tab(), "📊  Pano")
         self._tabs.addTab(self._build_registration_tab(), "📋  Kayıt")
         self._tabs.addTab(self._build_search_tab(), "🔍  Kontrol")
         self._tabs.addTab(self._build_export_tab(), "📊  Dışa Aktar")
 
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_bar.showMessage("Hazır.")
 
-    def closeEvent(self, event) -> None:
+        # Load dashboard on startup
+        self._refresh_dashboard()
+
+        # Refresh dashboard whenever tab changes to it
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+    def closeEvent(self, event):
         result = create_backup()
         if result:
             logger.info("Backup on close: %s", result)
         super().closeEvent(event)
+
+    def _on_tab_changed(self, index: int):
+        if index == 0:
+            self._refresh_dashboard()
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  TAB 0 — Dashboard (Pano)
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _build_dashboard_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(16)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # ── Capacity Section ───────────────────────────────────────────
+        cap_label = QLabel("📦  KAPASİTE DURUMU")
+        cap_label.setStyleSheet(
+            "color: #F8FAFC; font-size: 15px; font-weight: 700; padding: 4px 0;"
+        )
+        layout.addWidget(cap_label)
+
+        cap_row = QHBoxLayout()
+        cap_row.setSpacing(14)
+
+        self._card_animals = _MetricCard("Toplam Hayvan", "0", accent="#3B82F6")
+        cap_row.addWidget(self._card_animals)
+
+        self._card_capacity = _MetricCard("Hisse Kapasitesi", "0", accent="#8B5CF6")
+        cap_row.addWidget(self._card_capacity)
+
+        self._card_sold = _MetricCard("Satılan Hisse", "0", accent="#22C55E")
+        cap_row.addWidget(self._card_sold)
+
+        self._card_unsold = _MetricCard("Boş Hisse", "0", accent="#EF4444")
+        cap_row.addWidget(self._card_unsold)
+
+        layout.addLayout(cap_row)
+
+        # separator
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("background: #334155; max-height: 1px; margin: 8px 0;")
+        layout.addWidget(sep1)
+
+        # ── Financial Section ──────────────────────────────────────────
+        fin_label = QLabel("💰  FİNANSAL DURUM")
+        fin_label.setStyleSheet(
+            "color: #F8FAFC; font-size: 15px; font-weight: 700; padding: 4px 0;"
+        )
+        layout.addWidget(fin_label)
+
+        fin_row = QHBoxLayout()
+        fin_row.setSpacing(14)
+
+        self._card_revenue = _MetricCard(
+            "Beklenen Gelir (₺)", "0.00", accent="#8B5CF6"
+        )
+        fin_row.addWidget(self._card_revenue)
+
+        self._card_collected = _MetricCard(
+            "Toplanan Tutar (₺)", "0.00", accent="#22C55E"
+        )
+        fin_row.addWidget(self._card_collected)
+
+        self._card_outstanding = _MetricCard(
+            "Alacak / Kalan (₺)", "0.00", accent="#F59E0B"
+        )
+        fin_row.addWidget(self._card_outstanding)
+
+        layout.addLayout(fin_row)
+
+        # Refresh button
+        btn_refresh = QPushButton("🔄  Verileri Yenile")
+        btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_refresh.clicked.connect(self._refresh_dashboard)
+        layout.addWidget(btn_refresh, alignment=Qt.AlignmentFlag.AlignRight)
+
+        layout.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        )
+        return tab
+
+    def _refresh_dashboard(self):
+        stats: DashboardStats = self._ctrl.get_dashboard_stats()
+        self._card_animals.update_value(str(stats.total_animals))
+        self._card_capacity.update_value(str(stats.total_share_capacity))
+        self._card_sold.update_value(
+            str(stats.sold_shares),
+            f"Toplam pay: {stats.total_fractions_sold}"
+        )
+        self._card_unsold.update_value(str(stats.unsold_shares))
+        self._card_revenue.update_value(f"{stats.expected_revenue:,.2f}")
+        self._card_collected.update_value(f"{stats.collected_amount:,.2f}")
+        self._card_outstanding.update_value(f"{stats.outstanding_balance:,.2f}")
+        self._status_bar.showMessage("Pano güncellendi.", 3000)
 
     # ═══════════════════════════════════════════════════════════════════
     #  TAB 1 — Registration
@@ -628,7 +867,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.setSpacing(12)
 
-        # Animal form
         form_group = QGroupBox("Yeni Hayvan Bilgileri")
         fg = QGridLayout(form_group)
         fg.setSpacing(10)
@@ -652,7 +890,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(form_group)
 
-        # Dynamic shareholder rows
         sh_group = QGroupBox("Hissedarlar")
         sh_outer = QVBoxLayout(sh_group)
 
@@ -665,7 +902,9 @@ class MainWindow(QMainWindow):
         self._sh_count_label = QLabel("0 / 7")
         self._sh_count_label.setStyleSheet("color: #94A3B8; font-weight: 600;")
         btn_bar.addWidget(self._sh_count_label)
-        btn_bar.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        btn_bar.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
         sh_outer.addLayout(btn_bar)
 
         scroll = QScrollArea()
@@ -685,13 +924,11 @@ class MainWindow(QMainWindow):
         self._sh_rows: List[ShareholderRow] = []
         self._add_shareholder_row()
 
-        # Add animal button
         btn_add = QPushButton("➕  Hayvan Ekle (Taslaklara)")
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.clicked.connect(self._on_add_animal)
         layout.addWidget(btn_add, alignment=Qt.AlignmentFlag.AlignRight)
 
-        # Staging table
         stage_group = QGroupBox("Taslak Listesi")
         stl = QVBoxLayout(stage_group)
 
@@ -709,7 +946,9 @@ class MainWindow(QMainWindow):
         stl.addWidget(self._staging_table)
 
         bottom = QHBoxLayout()
-        bottom.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        bottom.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
 
         btn_discard = QPushButton("🗑  Taslağı Temizle")
         btn_discard.setObjectName("btnDanger")
@@ -725,14 +964,13 @@ class MainWindow(QMainWindow):
 
         stl.addLayout(bottom)
         layout.addWidget(stage_group)
-
         return tab
 
-    # -- dynamic shareholder helpers --
+    # -- shareholder row helpers --
 
-    def _add_shareholder_row(self) -> None:
+    def _add_shareholder_row(self):
         if len(self._sh_rows) >= 7:
-            QMessageBox.information(self, "Bilgi", "Maksimum 7 hissedar eklenebilir.")
+            QMessageBox.information(self, "Bilgi", "Maksimum 7 hissedar.")
             return
         row = ShareholderRow(len(self._sh_rows) + 1)
         row.remove_requested.connect(self._remove_shareholder_row)
@@ -740,7 +978,7 @@ class MainWindow(QMainWindow):
         self._sh_rows.append(row)
         self._update_sh_counter()
 
-    def _remove_shareholder_row(self, row: ShareholderRow) -> None:
+    def _remove_shareholder_row(self, row: ShareholderRow):
         if len(self._sh_rows) <= 1:
             QMessageBox.information(self, "Bilgi", "En az 1 hissedar gereklidir.")
             return
@@ -751,11 +989,11 @@ class MainWindow(QMainWindow):
             r.set_index(i + 1)
         self._update_sh_counter()
 
-    def _update_sh_counter(self) -> None:
+    def _update_sh_counter(self):
         self._sh_count_label.setText(f"{len(self._sh_rows)} / 7")
         self._btn_add_sh.setEnabled(len(self._sh_rows) < 7)
 
-    def _on_add_animal(self) -> None:
+    def _on_add_animal(self):
         try:
             price = Decimal(self._price_input.text().strip().replace(",", "."))
         except (InvalidOperation, ValueError):
@@ -775,12 +1013,11 @@ class MainWindow(QMainWindow):
         if not ok:
             QMessageBox.warning(self, "Doğrulama Hatası", msg)
             return
-
         self._refresh_staging_table()
         self._clear_reg_form()
         self._status_bar.showMessage(msg, 5000)
 
-    def _clear_reg_form(self) -> None:
+    def _clear_reg_form(self):
         self._price_input.clear()
         self._weight_input.clear()
         while len(self._sh_rows) > 1:
@@ -792,12 +1029,12 @@ class MainWindow(QMainWindow):
             first = self._sh_rows[0]
             first.edit_phone.clear()
             first.edit_name.clear()
-            first.cb_paid.setChecked(False)
+            first.edit_paid.setText("0")
             first.spin_fraction.setValue(1)
             first.combo_country.setCurrentIndex(0)
         self._update_sh_counter()
 
-    def _refresh_staging_table(self) -> None:
+    def _refresh_staging_table(self):
         staged = self._ctrl.staged_animals
         self._staging_table.setRowCount(len(staged))
         for row, a in enumerate(staged):
@@ -807,12 +1044,12 @@ class MainWindow(QMainWindow):
                 row, 2, QTableWidgetItem(f"{a.total_price} ₺ / {a.total_weight} kg")
             )
             parts = [
-                f"{sh.name} x{sh.share_fraction} ({'✅' if sh.is_paid else '❌'})"
+                f"{sh.name} x{sh.share_fraction} ({sh.paid_amount}₺)"
                 for sh in a.shareholders
             ]
             self._staging_table.setItem(row, 3, QTableWidgetItem(" | ".join(parts)))
 
-    def _on_discard(self) -> None:
+    def _on_discard(self):
         if not self._ctrl.staged_animals:
             return
         reply = QMessageBox.question(
@@ -825,7 +1062,7 @@ class MainWindow(QMainWindow):
             self._refresh_staging_table()
             self._status_bar.showMessage("Taslak temizlendi.", 5000)
 
-    def _on_commit(self) -> None:
+    def _on_commit(self):
         ok, msg = self._ctrl.commit_staging()
         if ok:
             self._refresh_staging_table()
@@ -835,7 +1072,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Hata", msg)
 
     # ═══════════════════════════════════════════════════════════════════
-    #  TAB 2 — Search & Control  (paginated)
+    #  TAB 2 — Search
     # ═══════════════════════════════════════════════════════════════════
 
     def _build_search_tab(self) -> QWidget:
@@ -845,35 +1082,30 @@ class MainWindow(QMainWindow):
 
         sg = QGroupBox("Arama")
         sgl = QHBoxLayout(sg)
-
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText(
-            "Hayvan ID / Telefon / İsim giriniz… (boş = tümü)"
-        )
+        self._search_input.setPlaceholderText("Hayvan ID / Telefon / İsim (boş = tümü)")
         self._search_input.returnPressed.connect(self._on_search)
         sgl.addWidget(self._search_input, 3)
-
         btn_search = QPushButton("🔍  Ara")
         btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_search.clicked.connect(self._on_search)
         sgl.addWidget(btn_search)
-
         layout.addWidget(sg)
 
         rg = QGroupBox("Sonuçlar")
         rgl = QVBoxLayout(rg)
 
-        self._results_table = QTableWidget(0, 7)
+        self._results_table = QTableWidget(0, 8)
         self._results_table.setHorizontalHeaderLabels(
             ["Hayvan ID", "Kesim Tarihi", "Fiyat (₺)", "Ağırlık (kg)",
-             "Hissedar", "Toplam Pay", "Durum"]
+             "Hissedar", "Toplam Pay", "Toplanan", "Durum"]
         )
         rh = self._results_table.horizontalHeader()
         assert rh is not None
-        for i in range(7):
+        for i in range(8):
             rh.setSectionResizeMode(
                 i,
-                QHeaderView.ResizeMode.Stretch if i == 6
+                QHeaderView.ResizeMode.Stretch if i == 7
                 else QHeaderView.ResizeMode.ResizeToContents,
             )
         self._results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -898,7 +1130,6 @@ class MainWindow(QMainWindow):
         self._btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_next.clicked.connect(self._on_next_page)
         pbar.addWidget(self._btn_next)
-
         rgl.addLayout(pbar)
 
         hint = QLabel("💡  Düzenlemek için satıra çift tıklayın.")
@@ -908,37 +1139,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(rg)
         return tab
 
-    def _on_search(self) -> None:
+    def _on_search(self):
         self._search_query = self._search_input.text().strip()
         self._current_page = 1
         self._load_page()
 
-    def _on_prev_page(self) -> None:
+    def _on_prev_page(self):
         if self._current_page > 1:
             self._current_page -= 1
             self._load_page()
 
-    def _on_next_page(self) -> None:
+    def _on_next_page(self):
         self._current_page += 1
         self._load_page()
 
-    def _load_page(self) -> None:
+    def _load_page(self):
         query = self._search_query
-
         if query and query.isdigit():
             rec = self._ctrl.search_by_animal_id(int(query))
             records = [rec] if rec else []
             self._populate_results_table(records, 1, 1)
             return
-
         if query:
             pr = self._ctrl.search_paginated(query, self._current_page, self._per_page)
         else:
             pr = self._ctrl.get_animals_paginated(self._current_page, self._per_page)
-
         self._current_page = pr.page
         self._populate_results_table(list(pr.records), pr.page, pr.total_pages)
-
         total = pr.total_records
         shown = len(pr.records)
         if total == 0:
@@ -949,32 +1176,55 @@ class MainWindow(QMainWindow):
                 5000,
             )
 
-    def _populate_results_table(
-        self, records: List[AnimalRecord], page: int, total_pages: int
-    ) -> None:
+    def _populate_results_table(self, records, page, total_pages):
         self._results_table.setRowCount(len(records))
         for row, rec in enumerate(records):
-            _c = lambda v, align=True: self._make_centered_item(str(v))
+            _c = self._make_centered_item
 
-            id_item = _c(rec.animal_id)
+            id_item = _c(str(rec.animal_id))
             id_item.setData(Qt.ItemDataRole.UserRole, rec)
             self._results_table.setItem(row, 0, id_item)
             self._results_table.setItem(row, 1, _c(rec.slaughter_date.strftime("%d.%m.%Y")))
-            self._results_table.setItem(row, 2, _c(rec.total_price))
-            self._results_table.setItem(row, 3, _c(rec.total_weight))
-            self._results_table.setItem(row, 4, _c(rec.share_count))
-            self._results_table.setItem(row, 5, _c(rec.total_fractions))
+            self._results_table.setItem(row, 2, _c(str(rec.total_price)))
+            self._results_table.setItem(row, 3, _c(str(rec.total_weight)))
+            self._results_table.setItem(row, 4, _c(str(rec.share_count)))
+            self._results_table.setItem(row, 5, _c(str(rec.total_fractions)))
 
-            paid = sum(1 for s in rec.shares if s.is_paid)
-            status_text = f"{paid}/{rec.share_count} ödendi"
-            st_item = _c(status_text)
-            if paid == rec.share_count:
-                st_item.setForeground(QColor("#22C55E"))
-            elif paid == 0:
-                st_item.setForeground(QColor("#EF4444"))
+            # Collected
+            collected = rec.total_paid
+            self._results_table.setItem(row, 6, _c(str(collected)))
+
+            # Status summary
+            tf = rec.total_fractions
+            paid_count = sum(
+                1 for s in rec.shares
+                if s.payment_status(rec.total_price, tf) == PaymentStatus.PAID
+            )
+            partial_count = sum(
+                1 for s in rec.shares
+                if s.payment_status(rec.total_price, tf) == PaymentStatus.PARTIAL
+            )
+            unpaid_count = rec.share_count - paid_count - partial_count
+
+            if unpaid_count == 0 and partial_count == 0:
+                txt = "✅ Tamamı ödendi"
+                clr = "#22C55E"
+            elif paid_count == 0 and partial_count == 0:
+                txt = "❌ Ödenmedi"
+                clr = "#EF4444"
             else:
-                st_item.setForeground(QColor("#F59E0B"))
-            self._results_table.setItem(row, 6, st_item)
+                parts = []
+                if paid_count:
+                    parts.append(f"{paid_count}✅")
+                if partial_count:
+                    parts.append(f"{partial_count}🟡")
+                if unpaid_count:
+                    parts.append(f"{unpaid_count}❌")
+                txt = " ".join(parts)
+                clr = "#F59E0B"
+            st_item = _c(txt)
+            st_item.setForeground(QColor(clr))
+            self._results_table.setItem(row, 7, st_item)
 
         self._page_label.setText(f"Sayfa {page} / {total_pages}")
         self._btn_prev.setEnabled(page > 1)
@@ -986,15 +1236,14 @@ class MainWindow(QMainWindow):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         return item
 
-    def _on_result_double_click(self, index) -> None:
+    def _on_result_double_click(self, index):
         row = index.row()
         id_item = self._results_table.item(row, 0)
         if not id_item:
             return
-        record: AnimalRecord = id_item.data(Qt.ItemDataRole.UserRole)
+        record = id_item.data(Qt.ItemDataRole.UserRole)
         if not record:
             return
-
         dialog = AnimalEditDialog(record, self._ctrl, self)
         dialog.exec()
         if dialog.data_changed:
@@ -1016,8 +1265,8 @@ class MainWindow(QMainWindow):
         info = QLabel(
             "Tüm hayvan ve hissedar bilgileri tek bir Excel dosyasına aktarılır.\n"
             "Ödeme durumuna göre hücreler renklendirilir:\n\n"
-            "  🟢  Yeşil = Ödendi          🔴  Kırmızı = Ödenmedi\n\n"
-            "Rapor: toplam fiyat/ağırlık, pay oranları ve hisse başı değerler."
+            "  🟢 Yeşil = Ödendi    🟡 Sarı = Kapora    🔴 Kırmızı = Ödenmedi\n\n"
+            "Rapor: toplam fiyat/ağırlık, pay oranları, hisse fiyat ve alınan tutar."
         )
         info.setStyleSheet("font-size: 13px; line-height: 1.6; padding: 8px;")
         il.addWidget(info)
@@ -1047,12 +1296,11 @@ class MainWindow(QMainWindow):
         )
         return tab
 
-    def _on_export(self) -> None:
+    def _on_export(self):
         records = self._ctrl.get_all_for_export()
         if not records:
             QMessageBox.information(self, "Bilgi", "Dışa aktarılacak kayıt bulunamadı.")
             return
-
         dest, _ = QFileDialog.getSaveFileName(
             self, "Rapor Kaydet",
             str(Path.home() / "kurban_raporu.xlsx"),
@@ -1060,31 +1308,23 @@ class MainWindow(QMainWindow):
         )
         if not dest:
             return
-
         self._btn_export.setEnabled(False)
         self._progress.setVisible(True)
         self._export_status.setText("Rapor oluşturuluyor…")
-
         self._export_worker = ExportWorker(records, Path(dest))
         self._export_worker.finished.connect(self._on_export_finished)
         self._export_worker.start()
 
-    def _on_export_finished(self, success: bool, message: str) -> None:
+    def _on_export_finished(self, success, message):
         self._progress.setVisible(False)
         self._btn_export.setEnabled(True)
-
         if success:
-            self._export_status.setStyleSheet(
-                "color: #22C55E; font-size: 12px; padding: 4px;"
-            )
+            self._export_status.setStyleSheet("color: #22C55E; font-size: 12px; padding: 4px;")
             self._export_status.setText(message)
             self._status_bar.showMessage("Dışa aktarma tamamlandı.", 5000)
             create_backup()
         else:
-            self._export_status.setStyleSheet(
-                "color: #EF4444; font-size: 12px; padding: 4px;"
-            )
+            self._export_status.setStyleSheet("color: #EF4444; font-size: 12px; padding: 4px;")
             self._export_status.setText(message)
             QMessageBox.critical(self, "Hata", message)
-
         self._export_worker = None

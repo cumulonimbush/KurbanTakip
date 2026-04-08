@@ -1,16 +1,15 @@
 """
-main.py — V2.1 Application entry point.
+main.py — V2.2 Application entry point.
 
-V2.1 changes
--------------
-* Loads ``style.qss`` from disk (Nuitka-safe ``APP_DIR``) and applies it
-  globally via ``app.setStyleSheet()``.
+Loads ``style.qss`` and initialises the database before showing the GUI.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sys
+from pathlib import Path
 
 from database import APP_DIR, initialise_database
 
@@ -33,8 +32,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _get_src_dir() -> Path:
+    """Directory where main.py and style.qss live (Nuitka-safe)."""
+    if getattr(sys, "frozen", False):
+        return Path(os.path.dirname(os.path.abspath(sys.argv[0])))
+    return Path(__file__).resolve().parent
+
+
 def main() -> None:
-    logger.info("===== Kurban Takip Sistemi V2.1 starting =====")
+    logger.info("===== Kurban Takip Sistemi V2.2 starting =====")
 
     initialise_database()
 
@@ -49,8 +55,9 @@ def main() -> None:
     app.setFont(QFont("Segoe UI", 10))
     app.setStyle("Fusion")
 
-    # ── Load external QSS stylesheet ───────────────────────────────────
-    qss_path = APP_DIR / "style.qss"
+    # ── Load QSS from source dir (where main.py lives) ─────────────────
+    src_dir = _get_src_dir()
+    qss_path = src_dir / "style.qss"
     if qss_path.exists():
         qss_text = qss_path.read_text(encoding="utf-8")
         app.setStyleSheet(qss_text)
