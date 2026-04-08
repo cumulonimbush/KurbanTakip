@@ -255,6 +255,7 @@ class AnimalEditDialog(QDialog):
         for i in range(2, 7):
             hh.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         self._sh_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._sh_table.verticalHeader().setDefaultSectionSize(40)
 
         self._populate_sh_table()
         sl.addWidget(self._sh_table)
@@ -266,6 +267,12 @@ class AnimalEditDialog(QDialog):
         btn_add_sh.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add_sh.clicked.connect(self._on_add_shareholder)
         sh_btn_row.addWidget(btn_add_sh)
+
+        btn_edit_sh = QPushButton("✏️  Seçili Hissedarı Düzenle")
+        btn_edit_sh.setObjectName("btnSmall")
+        btn_edit_sh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_edit_sh.clicked.connect(self._on_edit_shareholder)
+        sh_btn_row.addWidget(btn_edit_sh)
 
         btn_remove_sh = QPushButton("🗑  Seçili Hissedarı Sil")
         btn_remove_sh.setObjectName("btnRemove")
@@ -468,6 +475,33 @@ class AnimalEditDialog(QDialog):
         self._changed = True
         self._refresh_record()
 
+    def _on_edit_shareholder(self):
+        selected_phones = []
+        for row in range(self._sh_table.rowCount()):
+            wrapper = self._sh_table.cellWidget(row, 6)
+            if wrapper:
+                cb = wrapper.findChild(QCheckBox)
+                if cb and cb.isChecked():
+                    phone = cb.property("phone")
+                    if phone:
+                        selected_phones.append(phone)
+        if len(selected_phones) != 1:
+            QMessageBox.information(
+                self, "Bilgi",
+                "Lütfen düzenlemek istediğiniz tek bir hissedarı seçin.",
+            )
+            return
+        target_phone = selected_phones[0]
+        share = next((s for s in self._record.shares if s.phone == target_phone), None)
+        if share is None:
+            return
+        dlg = _EditShareholderDialog(
+            self._record.animal_id, share, self._ctrl, self
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._changed = True
+            self._refresh_record()
+
     @property
     def data_changed(self):
         return self._changed
@@ -551,6 +585,87 @@ class _AddShareholderDialog(QDialog):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Edit-Shareholder sub-dialog  (V2.2.1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _EditShareholderDialog(QDialog):
+    """Pre-populated dialog for editing an existing shareholder on an animal."""
+
+    def __init__(self, animal_id: int, share, ctrl, parent=None):
+        super().__init__(parent)
+        self._animal_id = animal_id
+        self._old_phone = share.phone
+        self._ctrl = ctrl
+        self.setWindowTitle("Hissedar Düzenle")
+        self.setMinimumWidth(460)
+
+        layout = QGridLayout(self)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Ülke Kodu:"), 0, 0)
+        self._combo_country = QComboBox()
+        for _iso, _code, _label in COUNTRY_CODES:
+            self._combo_country.addItem(_label, _iso)
+        layout.addWidget(self._combo_country, 0, 1)
+
+        layout.addWidget(QLabel("Telefon:"), 1, 0)
+        self._edit_phone = QLineEdit()
+        self._edit_phone.setPlaceholderText("5XX XXX XX XX")
+        layout.addWidget(self._edit_phone, 1, 1)
+
+        # Pre-populate phone: strip the country code prefix for display
+        self._edit_phone.setText(share.phone)
+
+        layout.addWidget(QLabel("Ad Soyad:"), 2, 0)
+        self._edit_name = QLineEdit(share.shareholder_name)
+        layout.addWidget(self._edit_name, 2, 1)
+
+        layout.addWidget(QLabel("Pay (Fraction):"), 3, 0)
+        self._spin_frac = QSpinBox()
+        self._spin_frac.setRange(1, 7)
+        self._spin_frac.setValue(share.share_fraction)
+        layout.addWidget(self._spin_frac, 3, 1)
+
+        layout.addWidget(QLabel("Alınan (₺):"), 4, 0)
+        self._edit_paid = QLineEdit(str(share.paid_amount))
+        layout.addWidget(self._edit_paid, 4, 1)
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(self._on_ok)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box, 5, 0, 1, 2)
+
+    def _on_ok(self):
+        raw = self._edit_phone.text().strip()
+        idx = self._combo_country.currentIndex()
+        code = COUNTRY_CODES[idx][1]
+        # If the user typed the full E.164 phone (starts with +), use as-is
+        full_phone = f"{code}{raw}" if raw and not raw.startswith("+") else raw
+        region = self._combo_country.currentData()
+
+        try:
+            paid = Decimal(self._edit_paid.text().strip().replace(",", "."))
+        except (InvalidOperation, ValueError):
+            paid = Decimal("0")
+
+        ok, msg = self._ctrl.update_share_in_animal(
+            animal_id=self._animal_id,
+            old_phone=self._old_phone,
+            new_raw_phone=full_phone,
+            new_name=self._edit_name.text().strip(),
+            paid_amount=paid,
+            share_fraction=self._spin_frac.value(),
+            region=region,
+        )
+        if ok:
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Hata", msg)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Dashboard metric card widget
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -618,7 +733,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(16, 16, 16, 8)
 
-        title = QLabel("🐄  Kurban Takip Sistemi  —  V2.2")
+        title = QLabel("Kurban Takip Sistemi  —  V2.2")
         title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         title.setStyleSheet("color: #F8FAFC; padding: 4px 0 8px 0;")
         root.addWidget(title)

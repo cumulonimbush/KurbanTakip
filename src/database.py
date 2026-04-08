@@ -342,6 +342,58 @@ class KurbanRepository:
             conn.commit()
         logger.info("Share removed: animal=%d phone=%s", animal_id, phone)
 
+    def update_share_in_animal(
+        self,
+        animal_id: int,
+        old_phone: str,
+        new_phone: str,
+        new_name: str,
+        paid_amount: Decimal,
+        share_fraction: int,
+    ) -> None:
+        """Update an existing share.  Handles phone (PK) change safely."""
+        with _get_connection(self._db_path) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN")
+                # Upsert the (possibly new) shareholder record
+                cursor.execute(
+                    "INSERT INTO shareholders (phone, name) VALUES (?, ?) "
+                    "ON CONFLICT(phone) DO UPDATE SET name=excluded.name",
+                    (new_phone, new_name),
+                )
+                if old_phone == new_phone:
+                    # Simple in-place update — no PK change
+                    cursor.execute(
+                        "UPDATE animal_shares "
+                        "SET paid_amount_kurus = ?, share_fraction = ? "
+                        "WHERE animal_id = ? AND phone = ?",
+                        (_try_to_kurus(paid_amount), share_fraction,
+                         animal_id, old_phone),
+                    )
+                else:
+                    # Phone changed → delete old row, insert new one
+                    cursor.execute(
+                        "DELETE FROM animal_shares "
+                        "WHERE animal_id = ? AND phone = ?",
+                        (animal_id, old_phone),
+                    )
+                    cursor.execute(
+                        "INSERT INTO animal_shares "
+                        "(animal_id, phone, paid_amount_kurus, share_fraction) "
+                        "VALUES (?, ?, ?, ?)",
+                        (animal_id, new_phone,
+                         _try_to_kurus(paid_amount), share_fraction),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        logger.info(
+            "Share updated: animal=%d old_phone=%s new_phone=%s fraction=%d paid=%s",
+            animal_id, old_phone, new_phone, share_fraction, paid_amount,
+        )
+
     # ── READ ─────────────────────────────────────────────────────────────
 
     _JOIN_SQL = (

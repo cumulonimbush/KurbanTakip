@@ -249,6 +249,54 @@ class KurbanController:
             logger.exception("Remove share failed: animal=%d phone=%s", animal_id, phone)
             return False, f"Hata: {exc}"
 
+    def update_share_in_animal(
+        self,
+        animal_id: int,
+        old_phone: str,
+        new_raw_phone: str,
+        new_name: str,
+        paid_amount: Decimal,
+        share_fraction: int,
+        region: str = "TR",
+    ) -> Tuple[bool, str]:
+        new_name = new_name.strip()
+        if not new_name:
+            return False, "Hissedar adı boş bırakılamaz."
+        raw = new_raw_phone.strip()
+        if not raw:
+            return False, "Telefon numarası boş."
+
+        if raw.startswith("+"):
+            ok, err, e164 = validate_phone(raw, None)  # type: ignore[arg-type]
+        else:
+            ok, err, e164 = validate_phone(raw, region)
+        if not ok:
+            return False, err
+
+        if not (1 <= share_fraction <= 7):
+            return False, "Pay 1–7 arasında olmalıdır."
+        if paid_amount < 0:
+            return False, "Ödeme tutarı negatif olamaz."
+
+        # Prevent duplicate phone within the same animal (if phone changed)
+        if e164 != old_phone:
+            rec = self._repo.search_by_animal_id(animal_id)
+            if rec:
+                existing_phones = {s.phone for s in rec.shares}
+                if e164 in existing_phones:
+                    return False, f"Bu hayvanda '{e164}' zaten kayıtlı."
+
+        try:
+            self._repo.update_share_in_animal(
+                animal_id, old_phone, e164, new_name, paid_amount, share_fraction
+            )
+            return True, f"Hissedar güncellendi: {e164}"
+        except Exception as exc:
+            logger.exception(
+                "Update share failed: animal=%d old=%s new=%s", animal_id, old_phone, e164
+            )
+            return False, f"Hata: {exc}"
+
     # ── Dashboard ────────────────────────────────────────────────────────
 
     def get_dashboard_stats(self) -> DashboardStats:
