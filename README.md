@@ -27,15 +27,17 @@ Proje, bağımlılık ve ortam yönetimi için `uv` paket yöneticisini kullanma
    ```bash
    git clone [https://github.com/ChestnutRisenKamehameha/KurbanTakip.git](https://github.com/ChestnutRisenKamehameha/KurbanTakip.git)
    cd KurbanTakip
-2. **Gereksinimleri yükleyin:**
+2. **Bağımlılıkları senkronize edin:**
    ```bash
-   uv add --dev nuitka zstandard
+   uv sync
    ```
 3. **Uygulamayı başlatın:**
    ```bash
-   uv run main.py
+   uv run src/main.py
    ```
-4. **Dilerseniz uygulamayı derleyin:**
+4. **(Opsiyonel) Nuitka ile Derleme:**
+Projeyi tek bir klasöre binary halde derlemek isterseniz:
+
    ```bash
-   uv run nuitka --standalone --plugin-enable=pyqt6 --windows-disable-console main.py
+   uv run nuitka --standalone --plugin-enable=pyqt6 --windows-disable-console src/main.py
    ```
