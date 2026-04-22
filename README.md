@@ -19,7 +19,7 @@ Yerel (local) organizasyonlar, çiftlikler ve dernekler için geliştirilmiş, y
 ## Kurulum ve Kullanım
 
 **Son Kullanıcılar İçin (Önerilen):**
-[Releases](https://github.com/ChestnutRisenKamehameha/KurbanTakip/releases) sayfasından en güncel `KurbanTakip_Kurulum.exe` dosyasını indirin ve kurun. Harici bir programa veya internet bağlantısına ihtiyaç duymaz.
+[Releases](https://github.com/cumulonimbush/KurbanTakip/releases) sayfasından en güncel `KurbanTakip_Kurulum.exe` dosyasını indirin ve kurun. Harici bir programa veya internet bağlantısına ihtiyaç duymaz.
 
 **Geliştiriciler İçin (Development Setup):**
 Proje, bağımlılık ve ortam yönetimi için `uv` paket yöneticisini kullanmaktadır.
