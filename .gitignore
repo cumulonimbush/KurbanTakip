@@ -19,3 +19,4 @@ main.dist/
 main.build/
 
 Output/ 
+installer_script.iss/
